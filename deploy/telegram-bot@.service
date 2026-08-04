@@ -12,6 +12,12 @@
 Description=Telegram bot (%i)
 After=network-online.target
 Wants=network-online.target
+# Give a crash-looping bot some breathing room instead of hammering Telegram:
+# stop retrying after 5 failed starts within 300s. These two MUST live in
+# [Unit] — systemd moved them here in v229, and it silently ignores them
+# (logging "Unknown key name") if they are left in [Service].
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -20,9 +26,6 @@ WorkingDirectory=/opt/telegram-bots
 ExecStart=/opt/telegram-bots/.venv/bin/python -B /opt/telegram-bots/%i.py
 Restart=on-failure
 RestartSec=10
-# Give a crash-looping bot some breathing room instead of hammering Telegram.
-StartLimitIntervalSec=300
-StartLimitBurst=5
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
 
