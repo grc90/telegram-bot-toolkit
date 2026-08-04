@@ -1,0 +1,30 @@
+# systemd template unit for a single Telegram bot process.
+# %i = the bot entry-point filename WITHOUT the .py extension.
+#
+# Install (as root):
+#   cp deploy/telegram-bot@.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now telegram-bot@example_posting_bot
+#
+# One instance per bot; see docs/deploy_oracle.md for the full list.
+
+[Unit]
+Description=Telegram bot (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/telegram-bots
+ExecStart=/opt/telegram-bots/.venv/bin/python -B /opt/telegram-bots/%i.py
+Restart=on-failure
+RestartSec=10
+# Give a crash-looping bot some breathing room instead of hammering Telegram.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

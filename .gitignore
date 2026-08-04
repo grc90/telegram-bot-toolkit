@@ -1,0 +1,45 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Runtime JSON state and queues
+*_state.json
+*_queue.json
+*_settings.json
+recent_posts_*.json
+*.json.lock
+
+# Local backups, logs, and temporary files
+backups/
+logs/
+*.log
+*.tmp
+*.bak
+
+# Python caches and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest_tmp/
+.pycache_test/
+
+# Local virtual environments
+.venv/
+venv/
+env/
+
+# Downloaded media / operator scratch space
+downloads/
+downloaded/
+media/
+tmp/
+temp/
+
+# Legacy code contains historical local credentials; keep it local-only.
+Legacy/
+
+# VS Code workspace and local launcher scripts (convenience files, not source).
+.vscode/
+start_all_bots.code-workspace
+start_all_bots.ps1
