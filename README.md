@@ -185,9 +185,9 @@ thumbnail URL fails the suite rather than quietly changing what subscribers get.
 
 ## Deployment
 
-[docs/deploy_hetzner.md](docs/deploy_hetzner.md) and
-[docs/deploy_oracle.md](docs/deploy_oracle.md) cover running the bots unattended
-on a VPS; [deploy/](deploy/) has a systemd template unit and an install script.
+[deploy/](deploy/) has what is needed to run the bots unattended on a VPS: a
+systemd template unit (one instance per entry point) and a bootstrap script that
+creates the virtualenv and enables the units.
 [docs/operacion.md](docs/operacion.md) is the day-to-day operations reference
 (in Spanish): command listing, diagnostics, recovery steps.
 

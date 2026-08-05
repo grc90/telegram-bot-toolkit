@@ -480,7 +480,7 @@ def main(argv=None):
 
     # queue
     p_queue = sub.add_parser("queue", help="Inspect a posting-bot queue")
-    p_queue.add_argument("bot", help="Bot name: examplechannel, examplechannel, examplechannel")
+    p_queue.add_argument("bot", help="Posting bot name, e.g. examplechannel")
     p_queue.add_argument("--count", action="store_true", help="Show only count")
     p_queue.add_argument("--preview", type=int, metavar="N", help="Show first N items")
     p_queue.add_argument("--search", metavar="TERM", help="Search items containing TERM")
@@ -496,7 +496,7 @@ def main(argv=None):
 
     # recent
     p_recent = sub.add_parser("recent", help="Show recent post history for a posting bot")
-    p_recent.add_argument("bot", help="Bot name: examplechannel, examplechannel, examplechannel")
+    p_recent.add_argument("bot", help="Posting bot name, e.g. examplechannel")
     p_recent.add_argument("--limit", type=int, default=10, metavar="N", help="Number of entries to show")
 
     # stats

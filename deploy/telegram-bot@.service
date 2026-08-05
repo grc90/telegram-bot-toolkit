@@ -6,7 +6,7 @@
 #   systemctl daemon-reload
 #   systemctl enable --now telegram-bot@example_posting_bot
 #
-# One instance per bot; see docs/deploy_oracle.md for the full list.
+# One instance per bot; deploy/install.sh enables the full set.
 
 [Unit]
 Description=Telegram bot (%i)

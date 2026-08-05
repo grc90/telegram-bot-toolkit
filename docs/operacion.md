@@ -11,13 +11,17 @@ Referencia práctica para operar el sistema local de bots de Telegram.
 python dev.py health
 python dev.py check-env imageboard_notifier
 python dev.py check-env examplechannel
+python dev.py check-env imageboard_search
 
-# Arrancar un bot (en terminales separadas o con start_all_bots.ps1)
+# Arrancar cada bot en su propia terminal (uno por entry point)
 py -3.14 imageboard_notifier_bot.py
 py -3.14 example_posting_bot.py
-py -3.14 example_posting_bot.py
-py -3.14 example_posting_bot.py
+py -3.14 imageboard_search_bot.py
 ```
+
+Cada bot es un proceso independiente. Si agregás más canales copiando
+`example_posting_bot.py`, cada copia se arranca igual y usa su propio conjunto de
+archivos runtime (ver `bot_name` en la copia).
 
 ---
 
@@ -40,8 +44,6 @@ Verifica:
 
 ```powershell
 python dev.py check-env imageboard_notifier
-python dev.py check-env examplechannel
-python dev.py check-env examplechannel
 python dev.py check-env examplechannel
 python dev.py check-env imageboard_search
 ```
@@ -82,7 +84,6 @@ También muestra el score threshold activo y los ratings permitidos para ese bot
 ```powershell
 python dev.py recent examplechannel
 python dev.py recent examplechannel --limit 20
-python dev.py recent examplechannel --limit 5
 ```
 
 Muestra los últimos N posts publicados (por `record_published_post`).
@@ -93,7 +94,6 @@ Muestra los últimos N posts publicados (por `record_published_post`).
 ```powershell
 python dev.py stats imageboard_notifier
 python dev.py stats examplechannel --lines 500
-python dev.py stats examplechannel
 ```
 
 Parsea las últimas N líneas del log y muestra:
@@ -153,7 +153,7 @@ no hace falta cancelar el flujo para consultarlos.
 | `/stop` | No hace nada destructivo: aclara que no hay tirada para frenar y sugiere `/unsubscribe` si la intención era esa |
 | `/check` | Forzar revisión inmediata de Danbooru |
 | `/test` | Enviar el post más reciente que coincida con los filtros |
-| `/last6` o `/g6` | Posts de las últimas 6 horas (score band bajo) |
+| `/last6` o `/g6` | Posts `rating:g` con score 5–10 de las últimas 6 horas |
 | `/top` | Últimas imágenes con score alto |
 | `/hot` | Tendencias del día (order:rank) |
 | `/blacklist` | Ver todos los tags bloqueados |
@@ -162,7 +162,7 @@ no hace falta cancelar el flujo para consultarlos.
 
 ---
 
-## Comandos de Telegram — bots de posteo (examplechannel / examplechannel / examplechannel)
+## Comandos de Telegram — bots de posteo (en este repo: examplechannel)
 
 | Comando | Descripción |
 |---------|-------------|
@@ -193,8 +193,6 @@ no hace falta cancelar el flujo para consultarlos.
 ```powershell
 # Ver qué publicaría el próximo lote sin publicar nada
 py -3.14 example_posting_bot.py --dry-run
-py -3.14 example_posting_bot.py --dry-run
-py -3.14 example_posting_bot.py --dry-run
 
 # Con conteo específico
 py -3.14 example_posting_bot.py --dry-run --dry-run-count 5
@@ -206,7 +204,7 @@ Garantías:
 - No escribe en `recent_posts_*.json`
 - Verificado por tests en `tests/test_posting_dry_run.py`
 
-### Bots de monitoreo Danbooru
+### Bot de monitoreo (imageboard_notifier)
 
 ```powershell
 # Ver qué posts coinciden con los filtros activos, sin enviar nada
@@ -219,19 +217,20 @@ Muestra:
 - Preview de los primeros 10 posts nuevos (ID, score, rating)
 - No modifica `*_state.json`
 
+**Ojo:** este dry-run solo ejercita fetch + filtrado; nunca llega a
+`send_post_to_chat()`. Un dry-run limpio no dice nada sobre el camino de envío
+(elección de variante de foto, retries, skip vs. fail) — eso lo cubren los tests
+unitarios.
+
 ---
 
 ## Blacklist — gestión
 
 ### Ver tags bloqueados
 
-```powershell
-# Desde Telegram (in-bot)
-/blacklist
-
-# Desde CLI local
-python dev.py filter-test imageboard_notifier --tag <tag>
-```
+El listado completo solo se consulta desde Telegram con `/blacklist`; en el
+código vive en el set `BLACKLISTED_TAGS` de `tag_blacklist.py`. Desde la CLI se
+testea de a un tag por vez (ver abajo).
 
 ### Testear si un tag está bloqueado
 
@@ -300,14 +299,14 @@ Errores comunes:
 
 ```powershell
 python backup_state.py
-# Crea backups/<timestamp>/
+# Crea backups/state_<YYYYMMDD_HHMMSS>/
 ```
 
 ### Retención de backups viejos (24h) — automática
 
-Cada bot de posteo (en este repo, `examplechannel`) corre `backup_loop()` cada 6 horas: crea un backup nuevo en `backups/state_<timestamp>/` y **después borra automáticamente las carpetas de backup completas con más de 24 horas** (`posting_bot_shared.py: run_backup_retention_cleanup`). La edad se decide por el timestamp del nombre de la carpeta (`state_YYYYMMDD_HHMMSS`), no por su fecha de modificación — borrar archivos de adentro actualiza el `mtime` de la carpeta, así que usar `mtime` haría que las carpetas viejas parezcan "recientes" para siempre. Es seguro que varios bots corran esta limpieza en paralelo: si dos la disparan casi al mismo tiempo, una carpeta ya borrada por la otra simplemente se ignora.
+Cada bot de posteo (en este repo, `examplechannel`) corre `backup_loop()` cada 6 horas: crea un backup nuevo en `backups/state_<timestamp>/` y **después borra automáticamente las carpetas de backup completas con más de 24 horas** (`posting_bot_shared.py: run_backup_retention_cleanup`). La edad se decide por el timestamp del nombre de la carpeta (`state_YYYYMMDD_HHMMSS`), no por su fecha de modificación — borrar archivos de adentro actualiza el `mtime` de la carpeta, así que usar `mtime` haría que las carpetas viejas parezcan "recientes" para siempre. Es seguro que varios bots de posteo corran esta limpieza en paralelo: si dos la disparan casi al mismo tiempo, una carpeta ya borrada por la otra simplemente se ignora.
 
-Si un bot no está corriendo, la limpieza automática de esa instancia no ocurre — pero con los 3 bots activos alcanza. Si falla borrar alguna carpeta puntual (ej. un lock momentáneo), queda un aviso en el log/alerta del bot y no frena el resto del lote.
+La limpieza la hacen solo los bots de posteo: si ninguno está corriendo, no se ejecuta y hay que forzarla a mano con los comandos de abajo. Si falla borrar alguna carpeta puntual (ej. un lock momentáneo), queda un aviso en el log/alerta del bot y no frena el resto del lote.
 
 **Comandos manuales** (para forzar la limpieza fuera del ciclo de 6h, o para el caso más chico de solo queues):
 
@@ -338,6 +337,10 @@ python backup_state.py --clean-queue-backups --apply
 | `IMAGEBOARD_NOTIFIER_POLL_INTERVAL_SECONDS` | imageboard_notifier | 600 | Intervalo entre ciclos (segundos) |
 | `IMAGEBOARD_NOTIFIER_DANBOORU_PAGES` | imageboard_notifier | 10 | Páginas de Danbooru a consultar por ciclo |
 | `IMAGEBOARD_NOTIFIER_MAX_DOWNLOAD_BYTES` | imageboard_notifier | 51380224 | Límite de descarga por archivo (bytes) |
-| `EXAMPLECHANNEL_TIMEZONE` | examplechannel | UTC | Timezone para horarios de publicación |
+| `IMAGEBOARD_SEARCH_MAX_DOWNLOAD_BYTES` | imageboard_search | 51380224 | Límite de descarga por archivo (bytes) |
+| `IMAGEBOARD_SEARCH_SEND_DELAY_SECONDS` | imageboard_search | 0.8 | Pausa entre envíos de una tirada |
 | `EXAMPLECHANNEL_BOT_TIMEZONE` | examplechannel | UTC | Timezone para horarios de publicación |
-| `EXAMPLECHANNEL_BOT_TIMEZONE` | examplechannel | UTC | Timezone para horarios de publicación |
+
+El nombre de la variable de timezone lo fija cada bot de posteo en su
+`timezone_env` (ver `example_posting_bot.py`), así que una copia para otro canal
+usa su propio prefijo. La lista completa de variables está en `.env.example`.
