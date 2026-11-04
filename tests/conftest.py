@@ -5,10 +5,30 @@ imports (imageboard_notifier_bot, imageboard_search_bot, etc.) see
 these values without each test file having to set them independently.
 """
 
+import atexit
+import logging
 import os
+import shutil
+import tempfile
 import uuid
+from pathlib import Path
 
 import pytest
+
+import bot_logging
+
+# Must run before any bot module is imported: the notifier creates its logger
+# at import time, and without this the suite writes into the real logs/ folder
+# (one test_<uuid>.log per posting app, plus fake lines in the notifier log).
+_TEST_LOG_DIR = Path(tempfile.mkdtemp(prefix="bots_test_logs_"))
+bot_logging.LOG_DIR = _TEST_LOG_DIR
+
+
+@atexit.register
+def _remove_test_logs():
+    logging.shutdown()
+    shutil.rmtree(_TEST_LOG_DIR, ignore_errors=True)
+
 
 _TEST_TOKEN = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ123456789"
 
