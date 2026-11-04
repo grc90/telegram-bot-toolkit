@@ -9,6 +9,7 @@ import time
 from collections import deque
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import telebot
@@ -19,7 +20,7 @@ from backup_state import DEFAULT_QUEUE_RETENTION_HOURS, clean_old_backup_folders
 from bot_logging import get_bot_logger
 from config_env import validate_telegram_token
 from json_storage import JsonStorageError, read_json_file, write_json_atomic
-from queue_dedupe import dedupe_queue, post_signature
+from queue_dedupe import dedupe_queue, normalize_source_url, post_signature, strip_twitter_tracking
 from recent_post_guard import filter_recent_posts, record_published_post, was_posted_recently
 
 
@@ -120,6 +121,54 @@ def build_queue_status_message(
         response += f" Hay {special_count} post(s) especial(es) pendientes de publicar."
 
     return response
+
+
+def source_match_key(source_url):
+    """Comparison key used by /delete to match a URL against a queued post's source.
+
+    Looser than the dedupe signature on purpose: dedupe keeps the scheme (http:// and
+    https:// are different posts to it), but an operator pasting a link back into the
+    bot should not have to reproduce it byte for byte. So the scheme is dropped from
+    the key, and an input without one ("danbooru.donmai.us/posts/1") is still matched.
+    Host/path/query normalization stays exactly the dedupe one, so anything dedupe
+    considers the same post is considered the same post here too.
+
+    Returns None when there is nothing usable to match on.
+    """
+
+    if not source_url or not isinstance(source_url, str):
+        return None
+
+    candidate = source_url.strip()
+
+    if not candidate:
+        return None
+
+    if not urlparse(candidate).scheme:
+        candidate = f"https://{candidate.lstrip('/')}"
+
+    normalized = normalize_source_url(candidate)
+
+    if not normalized:
+        return None
+
+    parsed = urlparse(normalized)
+
+    if not parsed.netloc:
+        return normalized.lower()
+
+    return urlunparse(("", parsed.netloc, parsed.path, "", parsed.query, ""))
+
+
+def describe_delete_result(removed_count, remaining_size):
+    if not removed_count:
+        return (
+            "No encontre ningun post con esa url en la cola. "
+            f"Quedan {remaining_size} post(s)."
+        )
+
+    plural = "s" if removed_count != 1 else ""
+    return f"Borre {removed_count} post{plural} de la cola. Quedan {remaining_size} post(s)."
 
 
 def describe_enqueue_result(status, size):
@@ -725,6 +774,39 @@ class PostingBotApp:
         self.log(f"Queued {post['type']} post. Queue size: {size}.")
         return "added", size
 
+    def queue_post_source_key(self, post):
+        """Match key for a queued post: its explicit source_url, else the one in its caption."""
+
+        if not isinstance(post, dict):
+            return None
+
+        source_url = post.get("source_url") or self.extract_source_url_from_caption(post.get("caption"))
+        return source_match_key(source_url)
+
+    def remove_queued_posts_by_source_url(self, source_url):
+        """Drop every queued post whose source URL matches `source_url`.
+
+        Returns (removed_count, remaining_size). removed_count is 0 when nothing
+        matched (the queue file is then left untouched). Raises ValueError when the
+        argument is not a usable URL, so the caller can tell "bad input" apart from
+        "no match". Posts without any source URL never match.
+        """
+
+        target_key = source_match_key(source_url)
+
+        if not target_key:
+            raise ValueError(f"unusable source url: {source_url!r}")
+
+        with self.queue_lock:
+            queue = self.load_queue()
+            kept_posts = [post for post in queue if self.queue_post_source_key(post) != target_key]
+            removed_count = len(queue) - len(kept_posts)
+
+            if removed_count:
+                self.save_queue(kept_posts)
+
+            return removed_count, len(kept_posts)
+
     def special_queue_size(self):
         with self.special_queue_lock:
             return len(self.special_posts)
@@ -789,7 +871,9 @@ class PostingBotApp:
 
     def build_caption(self, source_url):
         links = [("Source", source_url or self.default_source_url), *self.extra_caption_links]
-        return " | ".join(f"[{label}]({_escape_markdown_url_parens(url)})" for label, url in links if url)
+        return " | ".join(
+            f"[{label}]({_escape_markdown_url_parens(strip_twitter_tracking(url))})" for label, url in links if url
+        )
 
     def extract_source_url_from_caption(self, caption):
         if not caption:
@@ -1152,20 +1236,30 @@ class PostingBotApp:
 
             parts = (message.text or "").split(maxsplit=1)
             requested_posts = self.posts_per_batch
+            batch_multiplier = None
 
             if len(parts) > 1:
+                argument = parts[1].strip().lower()
+                is_multiplier = argument.startswith("x")
+
                 try:
-                    requested_posts = int(parts[1])
+                    parsed_value = int(argument[1:] if is_multiplier else argument)
                 except ValueError:
                     self.call_telegram(
                         "post_now_invalid_ack",
                         self.bot.send_message,
                         message.chat.id,
-                        "Usa /post_now o /post_now <numero>.",
+                        "Usa /post_now, /post_now <numero> o /post_now x<tandas>.",
                     )
                     return
 
-                if requested_posts <= 0:
+                if is_multiplier:
+                    batch_multiplier = parsed_value
+                    requested_posts = self.resolve_posts_per_batch() * parsed_value
+                else:
+                    requested_posts = parsed_value
+
+                if parsed_value <= 0:
                     self.call_telegram(
                         "post_now_invalid_range_ack",
                         self.bot.send_message,
@@ -1177,6 +1271,14 @@ class PostingBotApp:
             with self.manual_batch_size_lock:
                 self.manual_batch_size = requested_posts
 
+            if batch_multiplier is None:
+                amount_text = f"hasta {requested_posts} post(s)"
+            else:
+                amount_text = (
+                    f"hasta {requested_posts} post(s) "
+                    f"({batch_multiplier} tanda(s) de {requested_posts // batch_multiplier} efectivos)"
+                )
+
             self.clear_stop_request()
             self.post_now_event.set()
             self.call_telegram(
@@ -1184,7 +1286,7 @@ class PostingBotApp:
                 self.bot.send_message,
                 message.chat.id,
                 (
-                    f"Ok. Publicando hasta {requested_posts} post(s) ahora. "
+                    f"Ok. Publicando {amount_text} ahora. "
                     f"Luego sigo con los horarios programados ({self.schedule_timezone_name})."
                 ),
             )
@@ -1227,6 +1329,53 @@ class PostingBotApp:
                 response,
             )
 
+        @self.bot.message_handler(commands=["delete"])
+        def handle_delete(message):
+            if not self.is_allowed_user(message):
+                return
+
+            parts = (message.text or "").split(maxsplit=1)
+            requested_url = parts[1].strip() if len(parts) > 1 else ""
+
+            if not requested_url:
+                self.call_telegram(
+                    "delete_usage_ack",
+                    self.bot.send_message,
+                    message.chat.id,
+                    "Usa /delete <url>. Saco de la cola el post que tenga esa url como source.",
+                )
+                return
+
+            try:
+                removed_count, remaining_size = self.remove_queued_posts_by_source_url(requested_url)
+            except ValueError:
+                self.call_telegram(
+                    "delete_invalid_ack",
+                    self.bot.send_message,
+                    message.chat.id,
+                    "No pude leer esa url. Usa /delete <url>.",
+                )
+                return
+            except Exception as error:
+                self.log(f"Could not delete queued post by url ({type(error).__name__}).")
+                self.call_telegram(
+                    "delete_fail_ack",
+                    self.bot.send_message,
+                    message.chat.id,
+                    f"⚠️ No pude actualizar la cola ({type(error).__name__}).",
+                )
+                return
+
+            if removed_count:
+                self.log(f"Deleted {removed_count} queued post(s) by source url. Queue size: {remaining_size}.")
+
+            self.call_telegram(
+                "delete_ack",
+                self.bot.send_message,
+                message.chat.id,
+                describe_delete_result(removed_count, remaining_size),
+            )
+
         @self.bot.message_handler(commands=["status"])
         def handle_status(message):
             if not self.is_allowed_user(message):
@@ -1247,9 +1396,10 @@ class PostingBotApp:
             text = (
                 f"Comandos disponibles — {self.display_name}\n\n"
                 "Mandame una foto o un album y lo encolo.\n"
-                "/post_now [n] - publicar ahora (hasta n posts)\n"
+                "/post_now [n|xN] - publicar ahora (hasta n posts, o N tandas de efectivos)\n"
                 "/stop - frenar el lote en curso (no afecta lo ya encolado)\n"
                 "/queue - ver estado de la cola\n"
+                "/delete <url> - sacar de la cola el post con esa url de source\n"
                 "/status - estado completo del bot\n"
                 "/special - abrir modo especial (los proximos posts se guardan aparte)\n"
                 "/done - cerrar modo especial y publicar ese lote\n"

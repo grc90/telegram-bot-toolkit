@@ -315,3 +315,16 @@ def test_full_quality_photo_caption_is_left_alone(module, monkeypatch):
 
     assert module.send_post_to_chat(1, POST) == module.SEND_RESULT_SENT
     assert recorder.captions[0] == module.build_caption(POST)
+
+
+@pytest.mark.parametrize("module", NOTIFIERS)
+def test_lost_upload_response_does_not_fall_through_to_the_sample(module, monkeypatch):
+    # Un ReadTimeout durante la subida no prueba que Telegram no la recibio:
+    # subir tambien la variante sample dejaria la misma imagen duplicada.
+    recorder = SendRecorder(photo_error=requests_exceptions.ReadTimeout("read timed out"))
+    requested = install(module, monkeypatch, recorder)
+
+    assert module.send_post_to_chat(1, POST) == module.SEND_RESULT_FAILED
+    assert requested == ["https://cdn.test/original.jpg"]
+    assert set(recorder.kinds) == {"send_photo"}
+    assert len(recorder.kinds) == 1

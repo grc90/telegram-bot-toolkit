@@ -101,8 +101,75 @@ def test_help_lists_all_registered_commands(make_posting_app):
     app.bot.send_message.assert_called_once()
     text = app.bot.send_message.call_args[0][1]
 
-    for command in ("post_now", "stop", "queue", "status", "special", "done", "pause", "resume", "backup", "help"):
+    for command in (
+        "post_now",
+        "stop",
+        "queue",
+        "delete",
+        "status",
+        "special",
+        "done",
+        "pause",
+        "resume",
+        "backup",
+        "help",
+    ):
         assert f"/{command}" in text
+
+
+# ---------------------------------------------------------------------------
+# /post_now xN multiplies the effective batch size
+# ---------------------------------------------------------------------------
+
+def _post_now(app, text):
+    app.bot.send_message = Mock()
+    handler = _command_handler(app, "post_now")
+
+    class FakeMessage:
+        chat = Mock(id=1)
+        from_user = Mock(id=1)
+
+    message = FakeMessage()
+    message.text = text
+    handler(message)
+    return app.bot.send_message.call_args[0][1]
+
+
+def test_post_now_multiplier_uses_fixed_batch_size(make_posting_app):
+    app = make_posting_app(posts_per_batch=3)
+
+    text = _post_now(app, "/post_now x2")
+
+    assert app.manual_batch_size == 6
+    assert app.post_now_event.is_set()
+    assert "2 tanda(s) de 3 efectivos" in text
+
+
+def test_post_now_multiplier_resolves_auto_mode(make_posting_app, monkeypatch):
+    app = make_posting_app(posts_per_batch="auto")
+    monkeypatch.setattr(app, "queue_size", lambda: 250)
+
+    _post_now(app, "/post_now X3")
+
+    assert app.manual_batch_size == 9
+
+
+def test_post_now_plain_number_unchanged(make_posting_app):
+    app = make_posting_app(posts_per_batch=3)
+
+    _post_now(app, "/post_now 4")
+
+    assert app.manual_batch_size == 4
+
+
+@pytest.mark.parametrize("argument", ["x0", "x-1", "xabc", "x"])
+def test_post_now_multiplier_rejects_invalid(make_posting_app, argument):
+    app = make_posting_app(posts_per_batch=3)
+
+    _post_now(app, f"/post_now {argument}")
+
+    assert app.manual_batch_size is None
+    assert not app.post_now_event.is_set()
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +318,21 @@ def test_publish_batch_sends_post_and_returns_count(no_recent_history, monkeypat
     count = app.publish_batch("test", max_posts=1)
     assert count == 1
     app.bot.send_photo.assert_called_once()
+
+
+def test_publish_batch_strips_twitter_modifiers_from_already_queued_post(
+    no_recent_history, monkeypatch, make_posting_app, tmp_path
+):
+    monkeypatch.setattr(posting_bot_shared, "record_published_post", lambda *a, **k: None)
+    app = make_posting_app(posts_per_batch=1)
+    post = _photo(source_url="https://x.com/x3li9/status/2116335963693551890?a=PwqO8lGfYYWgrsZh5Eg&s=20")
+    (tmp_path / "queue.json").write_text(json.dumps([post]), encoding="utf-8")
+    app.bot.send_photo = Mock(return_value=Mock())
+
+    assert app.publish_batch("test", max_posts=1) == 1
+
+    caption = app.bot.send_photo.call_args.kwargs["caption"]
+    assert "[Source](https://x.com/x3li9/status/2116335963693551890)" in caption
 
 
 def test_publish_batch_does_not_send_when_queue_empty(no_recent_history, monkeypatch, make_posting_app):
@@ -431,3 +513,129 @@ def test_backup_loop_cleanup_failure_does_not_crash_loop(monkeypatch, make_posti
 
     with pytest.raises(_StopLoop):
         app.backup_loop()
+
+
+# ---------------------------------------------------------------------------
+# /delete — remove a queued post by its source URL
+# ---------------------------------------------------------------------------
+
+def test_source_match_key_ignores_scheme_and_trailing_slash():
+    key = posting_bot_shared.source_match_key("https://danbooru.donmai.us/posts/1")
+    assert posting_bot_shared.source_match_key("http://danbooru.donmai.us/posts/1/") == key
+    assert posting_bot_shared.source_match_key("danbooru.donmai.us/posts/1") == key
+    assert posting_bot_shared.source_match_key("  https://danbooru.donmai.us/posts/1  ") == key
+
+
+def test_source_match_key_keeps_distinct_posts_distinct():
+    assert posting_bot_shared.source_match_key(
+        "https://danbooru.donmai.us/posts/1"
+    ) != posting_bot_shared.source_match_key("https://danbooru.donmai.us/posts/2")
+
+
+def test_source_match_key_rejects_empty_input():
+    assert posting_bot_shared.source_match_key("") is None
+    assert posting_bot_shared.source_match_key("   ") is None
+    assert posting_bot_shared.source_match_key(None) is None
+
+
+def test_remove_queued_posts_by_source_url_removes_only_the_match(no_recent_history, make_posting_app, tmp_path):
+    app = make_posting_app()
+    app.enqueue_post(_photo(source_url="https://example.test/1", file_id="a"))
+    app.enqueue_post(_photo(source_url="https://example.test/2", file_id="b"))
+
+    removed_count, remaining_size = app.remove_queued_posts_by_source_url("https://example.test/1")
+
+    assert (removed_count, remaining_size) == (1, 1)
+    queue = json.loads((tmp_path / "queue.json").read_text())
+    assert [post["source_url"] for post in queue] == ["https://example.test/2"]
+
+
+def test_remove_queued_posts_by_source_url_accepts_url_without_scheme(no_recent_history, make_posting_app, tmp_path):
+    app = make_posting_app()
+    app.enqueue_post(_photo(source_url="https://example.test/1", file_id="a"))
+
+    removed_count, remaining_size = app.remove_queued_posts_by_source_url("example.test/1/")
+
+    assert (removed_count, remaining_size) == (1, 0)
+    assert json.loads((tmp_path / "queue.json").read_text()) == []
+
+
+def test_remove_queued_posts_by_source_url_matches_caption_only_post(no_recent_history, make_posting_app):
+    app = make_posting_app()
+    app.enqueue_post(
+        {
+            "type": "photo",
+            "file_id": "a",
+            "caption": "[Source](https://example.test/only%2Din%2Dcaption)",
+            "created_at": 1.0,
+        }
+    )
+
+    removed_count, remaining_size = app.remove_queued_posts_by_source_url(
+        "https://example.test/only%2Din%2Dcaption"
+    )
+
+    assert (removed_count, remaining_size) == (1, 0)
+
+
+def test_remove_queued_posts_by_source_url_reports_no_match(no_recent_history, make_posting_app, tmp_path):
+    app = make_posting_app()
+    app.enqueue_post(_photo(source_url="https://example.test/1", file_id="a"))
+
+    removed_count, remaining_size = app.remove_queued_posts_by_source_url("https://example.test/999")
+
+    assert (removed_count, remaining_size) == (0, 1)
+    assert len(json.loads((tmp_path / "queue.json").read_text())) == 1
+
+
+def test_remove_queued_posts_by_source_url_rejects_blank_url(no_recent_history, make_posting_app):
+    app = make_posting_app()
+
+    with pytest.raises(ValueError):
+        app.remove_queued_posts_by_source_url("   ")
+
+
+class _FakeDeleteMessage:
+    def __init__(self, text, user_id=1):
+        self.text = text
+        self.chat = Mock(id=555)
+        self.from_user = Mock(id=user_id)
+
+
+def test_delete_handler_removes_post_and_acks(no_recent_history, make_posting_app, tmp_path):
+    app = make_posting_app()
+    app.enqueue_post(_photo(source_url="https://example.test/1", file_id="a"))
+    app.bot.send_message = Mock()
+
+    _command_handler(app, "delete")(_FakeDeleteMessage("/delete https://example.test/1"))
+
+    assert json.loads((tmp_path / "queue.json").read_text()) == []
+    assert "Borre 1 post" in app.bot.send_message.call_args[0][1]
+
+
+def test_delete_handler_without_url_explains_usage(no_recent_history, make_posting_app, tmp_path):
+    app = make_posting_app()
+    app.enqueue_post(_photo(source_url="https://example.test/1", file_id="a"))
+    app.bot.send_message = Mock()
+
+    _command_handler(app, "delete")(_FakeDeleteMessage("/delete"))
+
+    assert "/delete <url>" in app.bot.send_message.call_args[0][1]
+    assert len(json.loads((tmp_path / "queue.json").read_text())) == 1
+
+
+def test_delete_handler_ignores_other_users(no_recent_history, make_posting_app, tmp_path):
+    app = make_posting_app()
+    app.enqueue_post(_photo(source_url="https://example.test/1", file_id="a"))
+    app.bot.send_message = Mock()
+
+    _command_handler(app, "delete")(_FakeDeleteMessage("/delete https://example.test/1", user_id=99))
+
+    app.bot.send_message.assert_not_called()
+    assert len(json.loads((tmp_path / "queue.json").read_text())) == 1
+
+
+def test_describe_delete_result_copy():
+    assert "No encontre" in posting_bot_shared.describe_delete_result(0, 3)
+    assert "Borre 1 post " in posting_bot_shared.describe_delete_result(1, 2)
+    assert "Borre 2 posts" in posting_bot_shared.describe_delete_result(2, 2)

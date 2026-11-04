@@ -278,6 +278,11 @@ def try_telegram_detailed(context, func, *args, **kwargs):
 
         try:
             return func(*args, **kwargs), None
+        except requests_exceptions.ReadTimeout as e:
+            # La peticion ya salio: Telegram pudo recibir y publicar la foto y
+            # solo perderse la respuesta. Reintentar la subida la duplicaria.
+            log(f"{context} failed, response lost; not retrying in place ({type(e).__name__}).")
+            return None, e
         except TRANSIENT_SEND_ERRORS as e:
             if attempt < SEND_RETRY_ATTEMPTS:
                 time.sleep(SEND_RETRY_BACKOFF_SECONDS * (attempt + 1))
@@ -683,8 +688,13 @@ def send_post_as_photo(chat_id, post, caption):
             return SEND_RESULT_SENT
 
         if error is not None and should_pause_for_telegram_error(error):
-            had_transient_failure = True
-        elif error is not None:
+            # La subida pudo llegar a Telegram aunque la respuesta se perdio
+            # (ReadTimeout, 502): probar otra variante duplicaria la foto en
+            # el chat. Se corta aqui y se reintenta el post en el proximo ciclo.
+            log(f"Post {post.get('id')}: photo upload outcome unknown; not trying other variants.")
+            return SEND_RESULT_FAILED
+
+        if error is not None:
             last_rejection = describe_telegram_error(error)
 
     if had_transient_failure:
@@ -917,24 +927,26 @@ def check_danbooru_once(reason):
 
     new_posts = [post for post in reversed(posts) if str(post["id"]) not in handled]
     sent_ids = []
-    skipped_ids = []
+
+    if not new_posts:
+        mark_handled([])
+        log(f"{reason}: no new matching posts.")
+        return 0
 
     for post in new_posts:
         result = send_post_to_subscribers(post)
 
+        # Se persiste post a post (no al final del lote) para que un apagado a
+        # mitad de ciclo no pierda el registro de lo ya enviado y lo reenvie
+        # al reiniciar.
         if result == SEND_RESULT_SENT:
             sent_ids.append(str(post["id"]))
             log(f"{reason}: sent Danbooru post {post['id']} with score {post.get('score')}.")
+            mark_handled([str(post["id"])])
         elif result == SEND_RESULT_SKIPPED:
             # Se da por visto: reintentarlo cada ciclo no cambiaria el resultado.
-            skipped_ids.append(str(post["id"]))
             log(f"{reason}: skipped Danbooru post {post['id']} (no photo-quality variant).")
-
-    if sent_ids or skipped_ids:
-        mark_handled(sent_ids + skipped_ids)
-    else:
-        mark_handled([])
-        log(f"{reason}: no new matching posts.")
+            mark_handled([str(post["id"])])
 
     return len(sent_ids)
 

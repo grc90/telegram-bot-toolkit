@@ -28,7 +28,7 @@ from json_storage import JsonStorageError, read_json_file, write_json_atomic
 
 API_TOKEN = get_required_env("IMAGEBOARD_SEARCH_TELEGRAM_TOKEN")
 BOT_NAME = "imageboard_search"
-BOT_VERSION = "2026-04-30-inline-tag-1"
+BOT_VERSION = "2026-09-21-inline-query-1"
 ALLOWED_USER_ID = get_required_env("BOTS_ALLOWED_USER_ID")
 SESSION_STATE_FILE = os.path.join(os.path.dirname(__file__), "imageboard_search_state.json")
 
@@ -36,8 +36,11 @@ DANBOORU_BASE_URL = "https://danbooru.donmai.us"
 DANBOORU_LIMIT = 100
 TAG_SUGGESTION_LIMIT = 8
 TAG_SUGGESTION_FETCH_LIMIT = 30
+INLINE_QUERY_CACHE_SECONDS = 30
 MAX_DOWNLOAD_BYTES = int(os.environ.get("IMAGEBOARD_SEARCH_MAX_DOWNLOAD_BYTES", str(49 * 1024 * 1024)))
 SEND_DELAY_SECONDS = float(os.environ.get("IMAGEBOARD_SEARCH_SEND_DELAY_SECONDS", "0.8"))
+
+bot_username = ""
 
 ALLOWED_RATINGS = {
     "g": "general",
@@ -424,6 +427,13 @@ def resume_current_step(chat_id):
         bot.register_next_step_handler_by_chat_id(chat_id, handler)
 
 
+def inline_usage_hint():
+    if bot_username:
+        return f"Tambien podes escribir @{bot_username} y la tag aca mismo para ver sugerencias en modo inline mientras escribis."
+
+    return "Tambien podes invocar el modo inline de este bot (@usuario_del_bot tag) para ver sugerencias mientras escribis."
+
+
 def prompt_for_tag(chat_id):
     clear_next_step(chat_id)
     update_session(chat_id, step="tag", tag="", age="", rating="", order="", tag_query="", tag_options=[])
@@ -431,7 +441,8 @@ def prompt_for_tag(chat_id):
         chat_id,
         (
             "Nueva busqueda iniciada. Enviame la tag.\n"
-            "Te voy a sacar sugerencias de Danbooru y te las dejo en botones inline."
+            "Te voy a sacar sugerencias de Danbooru y te las dejo en botones.\n"
+            f"{inline_usage_hint()}"
         ),
     )
     bot.register_next_step_handler_by_chat_id(chat_id, handle_tag_step)
@@ -520,7 +531,9 @@ def normalize_age(raw_value):
     return ""
 
 
-def search_tags(query_text):
+def autocomplete_tags(query_text):
+    """Query Danbooru's tag autocomplete and return ranked (name, post_count) pairs."""
+
     normalized_query = normalize_tag_text(query_text)
 
     if not normalized_query:
@@ -544,13 +557,22 @@ def search_tags(query_text):
         ),
     )
 
-    suggestions = []
+    seen = set()
+    ranked = []
 
     for item in ranked_items:
         name = str(item.get("value") or "").strip()
 
-        if name and name not in suggestions:
-            suggestions.append(name)
+        if name and name not in seen:
+            seen.add(name)
+            ranked.append((name, int(item.get("post_count") or 0)))
+
+    return ranked
+
+
+def search_tags(query_text):
+    normalized_query = normalize_tag_text(query_text)
+    suggestions = [name for name, _ in autocomplete_tags(query_text)]
 
     if normalized_query in suggestions:
         suggestions.remove(normalized_query)
@@ -604,6 +626,59 @@ def send_tag_suggestions(chat_id, tag_query, suggestions, tag_round):
         )
     except Exception as error:
         log(f"send_tag_suggestions keyboard failed ({type(error).__name__}: {error}).")
+
+
+def build_inline_tag_results(query_text):
+    ranked = autocomplete_tags(query_text)
+    results = []
+
+    for index, (name, post_count) in enumerate(ranked[:TAG_SUGGESTION_LIMIT]):
+        results.append(
+            types.InlineQueryResultArticle(
+                id=str(index),
+                title=name,
+                description=f"{post_count} post(s) en Danbooru",
+                input_message_content=types.InputTextMessageContent(name),
+            )
+        )
+
+    return results
+
+
+@bot.inline_handler(func=lambda inline_query: True)
+def handle_inline_tag_query(inline_query):
+    """Live tag autocomplete via Telegram's native inline mode.
+
+    Typing "@<bot_username> <partial tag>" (including in the chat with this
+    bot itself) triggers this on every keystroke; picking a result sends it
+    as a plain text message, which the normal tag-step flow then consumes
+    exactly like a typed tag.
+    """
+
+    if str(inline_query.from_user.id) != ALLOWED_USER_ID:
+        try_send("answer_inline_query", bot.answer_inline_query, inline_query.id, [], cache_time=1)
+        return
+
+    query_text = (inline_query.query or "").strip()
+
+    if not query_text:
+        try_send("answer_inline_query", bot.answer_inline_query, inline_query.id, [], cache_time=1)
+        return
+
+    try:
+        results = build_inline_tag_results(query_text)
+    except Exception as error:
+        log(f"inline tag query failed ({type(error).__name__}: {error}).")
+        results = []
+
+    try_send(
+        "answer_inline_query",
+        bot.answer_inline_query,
+        inline_query.id,
+        results,
+        cache_time=INLINE_QUERY_CACHE_SECONDS,
+        is_personal=True,
+    )
 
 
 def build_query(tag, age, rating, order):
@@ -1207,7 +1282,8 @@ def handle_start(message):
         (
             "Danbooru Fetcher listo.\n"
             "Te voy a pedir una tag, un age, un rating y un order para traer los ultimos 100 posts.\n"
-            "Enviame primero la tag y te sacare sugerencias inline desde Danbooru.\n"
+            "Enviame primero la tag y te sacare sugerencias desde Danbooru en botones.\n"
+            f"{inline_usage_hint()}\n"
             "Comandos utiles: /fetch reinicia la busqueda, /cancel cancela el flujo, /stop corta una tirada en curso, /help muestra ayuda."
         ),
     )
@@ -1225,7 +1301,8 @@ def handle_help(message):
             "Uso:\n"
             "1. /fetch\n"
             "2. manda una tag o parte de una tag, por ejemplo: remilia\n"
-            "3. elige una sugerencia inline de Danbooru o usa la tag tal cual\n"
+            "3. elige una sugerencia de Danbooru (en botones) o usa la tag tal cual\n"
+            f"   {inline_usage_hint()}\n"
             "4. manda un age (7d, <7d, 24h, 3mo) o toca un boton rapido\n"
             "5. manda un rating (g, s, q, e o g,s) o toca un boton rapido\n"
             "6. manda un order (updated, score, favcount, comment, rank, id, id_desc) o toca un boton rapido\n"
@@ -1376,11 +1453,21 @@ def restore_persisted_session():
     )
 
 
+def fetch_bot_username():
+    global bot_username
+
+    try:
+        bot_username = bot.get_me().username or ""
+    except Exception as error:
+        log(f"Could not fetch bot username ({type(error).__name__}: {error}). Inline hint will stay generic.")
+
+
 def run_bot():
     if not API_TOKEN:
         raise RuntimeError("Set IMAGEBOARD_SEARCH_TELEGRAM_TOKEN before running imageboard_search_bot.py")
 
     log(f"Starting {BOT_NAME} {BOT_VERSION}")
+    fetch_bot_username()
     restore_persisted_session()
     retry_delay = 5
 

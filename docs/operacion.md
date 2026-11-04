@@ -168,6 +168,7 @@ no hace falta cancelar el flujo para consultarlos.
 |---------|-------------|
 | `/post_now` | Publicar el siguiente lote inmediatamente |
 | `/post_now N` | Publicar N posts ahora |
+| `/post_now xN` | Publicar N tandas de efectivos ahora (N × posts por lote resueltos en ese momento) |
 | `/pause` | **Pausar publicaciones** sin detener el bot |
 | `/resume` | **Reanudar publicaciones** pausadas |
 | `/stop` | Interrumpir el lote en curso |
@@ -177,7 +178,12 @@ no hace falta cancelar el flujo para consultarlos.
 | `/special` | Activar modo especial (lote especial) |
 | `/done` | Cerrar modo especial y publicar el lote especial |
 | `/queue` | Ver tamaño de la queue |
+| `/delete <url>` | Sacar de la queue el post que tenga esa url como source |
 | `/status` | Estado completo del bot |
+
+### `/delete <url>`
+
+Busca en la queue el post cuyo source sea esa url (el campo `source_url`, o el `[Source](...)` del caption si no lo tiene) y lo borra. La comparación normaliza igual que el dedupe (host, barra final, `twitter.com` → `x.com`) e ignora además el esquema, así que `http://`, `https://` o pegar la url sin esquema dan el mismo resultado. Si no hay coincidencia no toca el archivo y lo avisa.
 
 ### Diferencia entre `/pause` y `/stop`
 

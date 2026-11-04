@@ -12,6 +12,14 @@ GENERIC_TELEGRAM_HOSTS = {"t.me", "telegram.me", "www.t.me", "www.telegram.me"}
 # so the query string must be kept instead of stripped like other sources.
 QUERY_IDENTITY_HOSTS_SUFFIXES = (".dcinside.com",)
 QUERY_IDENTITY_HOSTS = {"dcinside.com"}
+TWITTER_HOSTS = {
+    "x.com",
+    "www.x.com",
+    "mobile.x.com",
+    "twitter.com",
+    "www.twitter.com",
+    "mobile.twitter.com",
+}
 
 
 def _host_keeps_query(host):
@@ -44,6 +52,17 @@ def normalize_source_url(source_url):
     query = parsed.query if _host_keeps_query(host) else ""
 
     return urlunparse((parsed.scheme.lower(), host, path, "", query, ""))
+
+
+def strip_twitter_tracking(url):
+    """Drop the share modifiers (?s=20&t=...) from a Twitter/X link; other URLs pass through."""
+
+    parsed = urlparse(url)
+
+    if parsed.netloc.lower() not in TWITTER_HOSTS:
+        return url
+
+    return urlunparse(parsed._replace(query="", fragment=""))
 
 
 def is_generic_telegram_source(source_url):

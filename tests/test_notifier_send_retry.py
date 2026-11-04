@@ -25,7 +25,7 @@ def test_retry_rewinds_consumed_media_stream(module, monkeypatch):
         # requests drains the stream before the transport error surfaces.
         seen.append(stream.read())
         if len(seen) == 1:
-            raise requests_exceptions.ReadTimeout("read timed out")
+            raise requests_exceptions.ConnectionError("connection reset")
         return "sent"
 
     assert module.try_telegram("upload_photo", flaky_send, media) == "sent"
@@ -55,10 +55,28 @@ def test_transient_failure_gives_up_after_configured_attempts(module, monkeypatc
 
     def always_timeout():
         calls.append(1)
-        raise requests_exceptions.ReadTimeout("read timed out")
+        raise requests_exceptions.ConnectTimeout("connect timed out")
 
     assert module.try_telegram("upload_photo", always_timeout) is None
     assert len(calls) == module.SEND_RETRY_ATTEMPTS + 1
+
+
+@pytest.mark.parametrize("module", NOTIFIERS)
+def test_read_timeout_is_not_retried_in_place(module, monkeypatch):
+    # Tras un ReadTimeout Telegram pudo haber publicado la foto: reintentar
+    # la subida en el acto la duplicaria.
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    calls = []
+
+    def lost_response():
+        calls.append(1)
+        raise requests_exceptions.ReadTimeout("read timed out")
+
+    result, error = module.try_telegram_detailed("upload_photo", lost_response)
+
+    assert result is None
+    assert isinstance(error, requests_exceptions.ReadTimeout)
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("module", NOTIFIERS)

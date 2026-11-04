@@ -89,12 +89,99 @@ def media_url(post):
     return post.get("large_file_url") or post.get("file_url") or post.get("preview_file_url")
 
 
+TELEGRAM_SOURCE_HOSTS = {
+    "t.me",
+    "telegram.me",
+    "telegram.dog",
+    "telegram.org",
+    "telesco.pe",
+}
+
+
+def is_telegram_source(source):
+    """True when the post's source points at Telegram (usually https://t.me/...).
+
+    Those posts are reuploads of what a Telegram channel already published, so
+    every bot drops them instead of re-sending them.
+    """
+
+    if not source or not isinstance(source, str):
+        return False
+
+    for candidate in source.split():
+        candidate = candidate.strip().strip("<>\"'")
+
+        if not candidate:
+            continue
+
+        if "//" not in candidate:
+            # Fuentes sin esquema ("t.me/canal") tambien cuentan.
+            candidate = f"//{candidate}"
+
+        try:
+            host = urllib.parse.urlsplit(candidate).netloc.lower()
+        except ValueError:
+            continue
+
+        host = host.rsplit("@", 1)[-1].split(":")[0]
+
+        if any(host == item or host.endswith(f".{item}") for item in TELEGRAM_SOURCE_HOSTS):
+            return True
+
+    return False
+
+
+DRIVE_SOURCE_HOSTS = {
+    "drive.google.com",
+    "docs.google.com",
+    "drive.usercontent.google.com",
+}
+
+
+def is_drive_source(source):
+    """True when the post's source points at Google Drive.
+
+    Those posts link out to a Drive file instead of the actual media host, so
+    every bot drops them instead of trying to fetch/repost an inaccessible link.
+    """
+
+    if not source or not isinstance(source, str):
+        return False
+
+    for candidate in source.split():
+        candidate = candidate.strip().strip("<>\"'")
+
+        if not candidate:
+            continue
+
+        if "//" not in candidate:
+            candidate = f"//{candidate}"
+
+        try:
+            host = urllib.parse.urlsplit(candidate).netloc.lower()
+        except ValueError:
+            continue
+
+        host = host.rsplit("@", 1)[-1].split(":")[0]
+
+        if any(host == item or host.endswith(f".{item}") for item in DRIVE_SOURCE_HOSTS):
+            return True
+
+    return False
+
+
 def validate_post(post, *, allowed_ratings=None, require_file_url=True):
     if not isinstance(post, Mapping):
         return False, "post is not an object"
 
     if not post.get("id"):
         return False, "missing post id"
+
+    if is_telegram_source(post.get("source")):
+        return False, "source is a Telegram link"
+
+    if is_drive_source(post.get("source")):
+        return False, "source is a Google Drive link"
 
     rating = post.get("rating")
 

@@ -155,7 +155,7 @@ python backup_state.py
 
 ## Telegram commands
 
-Posting bot: `/help` `/status` `/queue` `/post_now` `/pause` `/resume` `/stop`
+Posting bot: `/help` `/status` `/queue` `/post_now` `/delete` `/pause` `/resume` `/stop`
 `/special` `/done` `/backup` `/posts_per_batch`
 
 Notifier: `/start` `/help` `/status` `/check` `/top` `/hot` `/blacklist` `/test`
