@@ -5,7 +5,7 @@ import os
 import sys
 from unittest.mock import MagicMock, patch
 
-import imageboard_notifier_bot as dangbot
+from imageboard_notifier_bot import APP as dangbot
 
 
 # ---------------------------------------------------------------------------
@@ -26,11 +26,11 @@ def test_hot_score_threshold_reads_env_var(monkeypatch):
 
 
 def test_top_threshold_default_is_20():
-    assert dangbot.TOP_COMMAND_SCORE_THRESHOLD >= 0  # loaded from env with default 20
+    assert dangbot.top_score_threshold >= 0  # loaded from env with default 20
 
 
 def test_hot_threshold_default_is_positive():
-    assert dangbot.HOT_COMMAND_SCORE_THRESHOLD >= 0  # loaded from env with default 10
+    assert dangbot.hot_score_threshold >= 0  # loaded from env with default 10
 
 
 # ---------------------------------------------------------------------------
@@ -38,15 +38,15 @@ def test_hot_threshold_default_is_positive():
 # ---------------------------------------------------------------------------
 
 def test_dry_run_returns_0_on_success(monkeypatch, tmp_path):
-    monkeypatch.setattr(dangbot, "STATE_FILE", str(tmp_path / "state.json"))
-    monkeypatch.setattr(dangbot, "fetch_matching_posts", lambda: [])
+    monkeypatch.setattr(dangbot, "state_file", str(tmp_path / "state.json"))
+    monkeypatch.setattr(dangbot, "fetch_matching_posts", lambda **kwargs: [])
     result = dangbot.main(["--dry-run"])
     assert result == 0
 
 
 def test_dry_run_does_not_call_send(monkeypatch, tmp_path):
-    monkeypatch.setattr(dangbot, "STATE_FILE", str(tmp_path / "state.json"))
-    monkeypatch.setattr(dangbot, "fetch_matching_posts", lambda: [])
+    monkeypatch.setattr(dangbot, "state_file", str(tmp_path / "state.json"))
+    monkeypatch.setattr(dangbot, "fetch_matching_posts", lambda **kwargs: [])
     send_calls = []
     monkeypatch.setattr(dangbot, "send_post_to_subscribers", lambda p: send_calls.append(p))
     dangbot.main(["--dry-run"])
@@ -55,8 +55,8 @@ def test_dry_run_does_not_call_send(monkeypatch, tmp_path):
 
 def test_dry_run_does_not_modify_state(monkeypatch, tmp_path):
     state_file = tmp_path / "state.json"
-    monkeypatch.setattr(dangbot, "STATE_FILE", str(state_file))
-    monkeypatch.setattr(dangbot, "fetch_matching_posts", lambda: [
+    monkeypatch.setattr(dangbot, "state_file", str(state_file))
+    monkeypatch.setattr(dangbot, "fetch_matching_posts", lambda **kwargs: [
         {"id": 99, "rating": "g", "score": 15, "file_url": "https://x.test/1.jpg", "tag_string": ""},
     ])
     dangbot.main(["--dry-run"])
@@ -65,8 +65,8 @@ def test_dry_run_does_not_modify_state(monkeypatch, tmp_path):
 
 
 def test_dry_run_prints_summary(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(dangbot, "STATE_FILE", str(tmp_path / "state.json"))
-    monkeypatch.setattr(dangbot, "fetch_matching_posts", lambda: [
+    monkeypatch.setattr(dangbot, "state_file", str(tmp_path / "state.json"))
+    monkeypatch.setattr(dangbot, "fetch_matching_posts", lambda **kwargs: [
         {"id": 1, "rating": "g", "score": 10, "file_url": "https://x.test/1.jpg", "tag_string": ""},
         {"id": 2, "rating": "g", "score": 12, "file_url": "https://x.test/2.jpg", "tag_string": ""},
     ])
@@ -77,8 +77,8 @@ def test_dry_run_prints_summary(monkeypatch, tmp_path, capsys):
 
 
 def test_dry_run_fetch_failure_returns_1(monkeypatch, tmp_path):
-    monkeypatch.setattr(dangbot, "STATE_FILE", str(tmp_path / "state.json"))
-    monkeypatch.setattr(dangbot, "fetch_matching_posts", lambda: (_ for _ in ()).throw(RuntimeError("API down")))
+    monkeypatch.setattr(dangbot, "state_file", str(tmp_path / "state.json"))
+    monkeypatch.setattr(dangbot, "fetch_matching_posts", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("API down")))
     result = dangbot.main(["--dry-run"])
     assert result == 1
 

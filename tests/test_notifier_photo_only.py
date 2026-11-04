@@ -13,7 +13,9 @@ import io
 import pytest
 from requests import exceptions as requests_exceptions
 
-import imageboard_notifier_bot as notifierbot
+from imageboard_notifier_bot import APP as notifierbot
+import danbooru_notifier_shared as shared
+import danbooru_client
 
 NOTIFIERS = [pytest.param(notifierbot, id="notifier")]
 
@@ -68,7 +70,7 @@ class SendRecorder:
 
 def install(module, monkeypatch, recorder, *, downloads=None):
     monkeypatch.setattr(module, "bot", recorder)
-    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(shared.time, "sleep", lambda _seconds: None)
     # call_telegram no envia nada mientras el cooldown de API este activo.
     monkeypatch.setattr(module, "api_cooldown_until", 0)
 
@@ -95,14 +97,14 @@ def test_good_photo_is_sent_from_the_original_variant(module, monkeypatch):
     recorder = SendRecorder()
     requested = install(module, monkeypatch, recorder)
 
-    assert module.send_post_to_chat(1, POST) == module.SEND_RESULT_SENT
+    assert module.send_post_to_chat(1, POST) == shared.SEND_RESULT_SENT
     assert recorder.kinds == ["send_photo"]
     assert requested == ["https://cdn.test/original.jpg"]
 
 
 @pytest.mark.parametrize("module", NOTIFIERS)
 def test_oversized_original_falls_back_to_sample_never_to_document(module, monkeypatch):
-    oversized = b"x" * (module.TELEGRAM_PHOTO_MAX_BYTES + 1)
+    oversized = b"x" * (danbooru_client.TELEGRAM_PHOTO_MAX_BYTES + 1)
     recorder = SendRecorder()
     requested = install(
         module,
@@ -114,7 +116,7 @@ def test_oversized_original_falls_back_to_sample_never_to_document(module, monke
         },
     )
 
-    assert module.send_post_to_chat(1, POST) == module.SEND_RESULT_SENT
+    assert module.send_post_to_chat(1, POST) == shared.SEND_RESULT_SENT
     assert recorder.kinds == ["send_photo"]
     assert requested == ["https://cdn.test/original.jpg", "https://cdn.test/sample.jpg"]
     assert "send_document" not in recorder.kinds
@@ -122,7 +124,7 @@ def test_oversized_original_falls_back_to_sample_never_to_document(module, monke
 
 @pytest.mark.parametrize("module", NOTIFIERS)
 def test_unsendable_post_reports_the_danbooru_link_and_never_a_document(module, monkeypatch):
-    oversized = b"x" * (module.TELEGRAM_PHOTO_MAX_BYTES + 1)
+    oversized = b"x" * (danbooru_client.TELEGRAM_PHOTO_MAX_BYTES + 1)
     recorder = SendRecorder()
     install(
         module,
@@ -134,10 +136,10 @@ def test_unsendable_post_reports_the_danbooru_link_and_never_a_document(module, 
         },
     )
 
-    assert module.send_post_to_chat(1, POST) == module.SEND_RESULT_SKIPPED
+    assert module.send_post_to_chat(1, POST) == shared.SEND_RESULT_SKIPPED
     # Sin fallback posible: llega el link a Danbooru, nunca un archivo.
     assert recorder.kinds == ["send_message"]
-    assert module.post_url(POST) in recorder.calls[0][1]
+    assert shared.post_url(POST) in recorder.calls[0][1]
     assert "send_document" not in recorder.kinds
 
 
@@ -163,7 +165,7 @@ def test_network_failure_reports_failed_so_the_post_is_retried(module, monkeypat
     recorder = SendRecorder(photo_error=requests_exceptions.ReadTimeout("read timed out"))
     install(module, monkeypatch, recorder)
 
-    assert module.send_post_to_chat(1, POST) == module.SEND_RESULT_FAILED
+    assert module.send_post_to_chat(1, POST) == shared.SEND_RESULT_FAILED
     assert "send_document" not in recorder.kinds
     assert "send_message" not in recorder.kinds
 
@@ -174,7 +176,7 @@ def test_non_photo_extension_is_skipped_instead_of_sent_as_document(module, monk
     install(module, monkeypatch, recorder)
     zip_post = dict(POST, file_ext="zip", file_url="https://cdn.test/archive.zip")
 
-    assert module.send_post_to_chat(1, zip_post) == module.SEND_RESULT_SKIPPED
+    assert module.send_post_to_chat(1, zip_post) == shared.SEND_RESULT_SKIPPED
     assert recorder.calls == []
 
 
@@ -184,7 +186,7 @@ def test_post_without_usable_media_url_is_skipped(module, monkeypatch):
     install(module, monkeypatch, recorder)
     preview_only = {"id": 1, "file_ext": "jpg", "preview_file_url": "https://cdn.test/preview.jpg"}
 
-    assert module.send_post_to_chat(1, preview_only) == module.SEND_RESULT_SKIPPED
+    assert module.send_post_to_chat(1, preview_only) == shared.SEND_RESULT_SKIPPED
     assert recorder.calls == []
 
 
@@ -192,7 +194,7 @@ def test_post_without_usable_media_url_is_skipped(module, monkeypatch):
 def test_no_notifier_source_still_references_the_removed_fallback(module):
     import inspect
 
-    source = inspect.getsource(module)
+    source = inspect.getsource(shared)
     assert "No pude enviar este post como foto" not in source
     assert "send_document" not in source
 
@@ -233,7 +235,7 @@ def test_oversized_original_is_never_downloaded(module, monkeypatch):
         downloads={"https://cdn.donmai.us/sample/28/ba/sample-28ba.jpg": b"sample-bytes"},
     )
 
-    assert module.send_post_to_chat(1, HUGE_POST) == module.SEND_RESULT_SENT
+    assert module.send_post_to_chat(1, HUGE_POST) == shared.SEND_RESULT_SENT
     # El original (9346x11934, 22 MB) se descarta por metadata, sin bajarlo.
     assert requested == ["https://cdn.donmai.us/sample/28/ba/sample-28ba.jpg"]
     assert recorder.kinds == ["send_photo"]
@@ -241,17 +243,17 @@ def test_oversized_original_is_never_downloaded(module, monkeypatch):
 
 @pytest.mark.parametrize("module", NOTIFIERS)
 def test_rejection_reasons_match_telegram_photo_limits(module):
-    limit = module.TELEGRAM_PHOTO_MAX_TOTAL_DIMENSION
-    ratio = module.TELEGRAM_PHOTO_MAX_ASPECT_RATIO
+    limit = danbooru_client.TELEGRAM_PHOTO_MAX_TOTAL_DIMENSION
+    ratio = danbooru_client.TELEGRAM_PHOTO_MAX_ASPECT_RATIO
 
-    assert module.photo_variant_rejection(850, 1085, None) == ""
-    assert "width+height" in module.photo_variant_rejection(limit, 1, None)
-    assert "aspect ratio" in module.photo_variant_rejection(ratio * 100 + 1, 100, None)
-    assert "photo limit" in module.photo_variant_rejection(
-        800, 600, module.TELEGRAM_PHOTO_MAX_BYTES + 1
+    assert danbooru_client.photo_variant_rejection(850, 1085, None) == ""
+    assert "width+height" in danbooru_client.photo_variant_rejection(limit, 1, None)
+    assert "aspect ratio" in danbooru_client.photo_variant_rejection(ratio * 100 + 1, 100, None)
+    assert "photo limit" in danbooru_client.photo_variant_rejection(
+        800, 600, danbooru_client.TELEGRAM_PHOTO_MAX_BYTES + 1
     )
     # Sin metadata se intenta igual en vez de descartar de mas.
-    assert module.photo_variant_rejection(None, None, None) == ""
+    assert danbooru_client.photo_variant_rejection(None, None, None) == ""
 
 
 @pytest.mark.parametrize("module", NOTIFIERS)
@@ -269,11 +271,11 @@ def test_dimension_rejection_reports_the_link_without_downloading(module, monkey
     recorder = SendRecorder()
     requested = install(module, monkeypatch, recorder, downloads={})
 
-    assert module.send_post_to_chat(1, impossible) == module.SEND_RESULT_SKIPPED
+    assert module.send_post_to_chat(1, impossible) == shared.SEND_RESULT_SKIPPED
     assert requested == []
     assert recorder.kinds == ["send_message"]
     notice = recorder.calls[0][1]
-    assert module.post_url(impossible) in notice
+    assert shared.post_url(impossible) in notice
     assert "width+height" in notice
 
 
@@ -282,7 +284,7 @@ def test_transient_failure_stays_silent_because_it_will_be_retried(module, monke
     recorder = SendRecorder(photo_error=requests_exceptions.ReadTimeout("read timed out"))
     install(module, monkeypatch, recorder)
 
-    assert module.send_post_to_chat(1, POST) == module.SEND_RESULT_FAILED
+    assert module.send_post_to_chat(1, POST) == shared.SEND_RESULT_FAILED
     # Nada de avisos por un corte de red: el post se reintenta solo.
     assert "send_message" not in recorder.kinds
 
@@ -302,10 +304,10 @@ def test_downgraded_photo_keeps_the_plain_caption(module, monkeypatch):
         downloads={HUGE_POST["large_file_url"]: b"sample-bytes"},
     )
 
-    assert module.send_post_to_chat(1, huge_with_source) == module.SEND_RESULT_SENT
+    assert module.send_post_to_chat(1, huge_with_source) == shared.SEND_RESULT_SENT
     assert recorder.kinds == ["send_photo"]
     assert recorder.captions[0] == "https://www.pixiv.net/artworks/147687176"
-    assert module.post_url(huge_with_source) not in recorder.captions[0]
+    assert shared.post_url(huge_with_source) not in recorder.captions[0]
 
 
 @pytest.mark.parametrize("module", NOTIFIERS)
@@ -313,8 +315,8 @@ def test_full_quality_photo_caption_is_left_alone(module, monkeypatch):
     recorder = SendRecorder()
     install(module, monkeypatch, recorder)
 
-    assert module.send_post_to_chat(1, POST) == module.SEND_RESULT_SENT
-    assert recorder.captions[0] == module.build_caption(POST)
+    assert module.send_post_to_chat(1, POST) == shared.SEND_RESULT_SENT
+    assert recorder.captions[0] == danbooru_client.build_caption(POST)
 
 
 @pytest.mark.parametrize("module", NOTIFIERS)
@@ -324,7 +326,26 @@ def test_lost_upload_response_does_not_fall_through_to_the_sample(module, monkey
     recorder = SendRecorder(photo_error=requests_exceptions.ReadTimeout("read timed out"))
     requested = install(module, monkeypatch, recorder)
 
-    assert module.send_post_to_chat(1, POST) == module.SEND_RESULT_FAILED
+    assert module.send_post_to_chat(1, POST) == shared.SEND_RESULT_FAILED
     assert requested == ["https://cdn.test/original.jpg"]
     assert set(recorder.kinds) == {"send_photo"}
     assert len(recorder.kinds) == 1
+
+
+@pytest.mark.parametrize("module", NOTIFIERS)
+def test_lost_animation_response_is_not_reuploaded(module, monkeypatch):
+    # Un ReadTimeout en el envio por URL puede haber entregado el gif: subirlo
+    # descargado lo duplicaria. Se reintenta el post en el proximo ciclo.
+    gif_post = dict(POST, file_ext="gif", file_url="https://cdn.test/anim.gif", large_file_url=None)
+
+    class AnimationTimeout(SendRecorder):
+        def send_animation(self, chat_id, media, caption=None):
+            self.calls.append(("send_animation", media))
+            raise requests_exceptions.ReadTimeout("lost")
+
+    recorder = AnimationTimeout()
+    requested = install(module, monkeypatch, recorder)
+
+    assert module.send_post_to_chat(1, gif_post) == shared.SEND_RESULT_FAILED
+    assert recorder.kinds == ["send_animation"]
+    assert requested == []

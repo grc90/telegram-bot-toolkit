@@ -407,3 +407,52 @@ def test_restore_persisted_session_noop_when_nothing_persisted(monkeypatch):
     danfetcherbot.restore_persisted_session()
 
     assert registered == []
+
+
+# ---------------------------------------------------------------------------
+# Danbooru tag limit (2 tags without a Gold account; order: counts)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "tags, expected",
+    [
+        ("remilia_scarlet", 1),
+        ("remilia_scarlet flandre_scarlet", 2),
+        ("-solo *_breasts ~cat", 3),
+        ("cat rating:g age:<=1y score:>10 order:score", 2),
+        ("re:zero_kara_hajimeru_isekai_seikatsu", 1),
+        ("", 0),
+    ],
+)
+def test_count_limited_tags(tags, expected):
+    assert danfetcherbot.count_limited_tags(tags) == expected
+
+
+def test_build_query_keeps_order_with_one_tag():
+    assert danfetcherbot.build_query("cat", "<=1y", "g", "score") == "cat age:<=1y rating:g order:score"
+
+
+def test_build_query_drops_order_when_two_tags_fill_the_limit():
+    query = danfetcherbot.build_query("cat dog", "<=1y", "g", "score")
+
+    assert query == "cat dog age:<=1y rating:g"
+    assert danfetcherbot.count_limited_tags(query) == danfetcherbot.DANBOORU_TAG_LIMIT
+
+
+def test_tag_form_callback_combined_rejects_more_tags_than_the_limit(monkeypatch):
+    mock_callback_plumbing(monkeypatch)
+    sent_texts = []
+    monkeypatch.setattr(danfetcherbot, "send_text", lambda chat_id, text: sent_texts.append(text))
+
+    danfetcherbot.update_session(
+        1212, step="tag_form", tag_form_compound="a_b_c", tag_form_combined="a b c"
+    )
+
+    danfetcherbot.handle_tag_form_callback(make_fake_callback(1212, "tagform:combined"))
+
+    session = danfetcherbot.get_session(1212)
+    assert session["step"] == "tag"
+    assert session["tag"] == ""
+    assert any("hasta 2 tags" in text and "mandaste 3" in text for text in sent_texts)
+
+    danfetcherbot.clear_session(1212)

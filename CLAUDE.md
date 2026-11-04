@@ -77,10 +77,16 @@ Three entry points, each an independent bot process:
   rate limiting, backup loop). Almost all posting logic lives in the shared
   module, not here. Adding a channel means copying this file and changing
   `bot_name` plus the env prefix.
-- `imageboard_notifier_bot.py` (`imageboard_notifier`) — polls the Danbooru API,
-  filters by rating/score/tag blacklist, pushes new matches to subscribers.
+- `imageboard_notifier_bot.py` (`imageboard_notifier`) — same pattern for the
+  notifier: a config file that calls `create_notifier_bot(**config)` from
+  `danbooru_notifier_shared.py` and gets back a `DanbooruNotifierApp`. Ratings,
+  score thresholds, the `/last6` score band, env prefix and state file are
+  config; a second notifier is a second config file. Tests patch the `APP`
+  instance (`from imageboard_notifier_bot import APP`), not module globals.
 - `imageboard_search_bot.py` (`imageboard_search`) — interactive operator-driven
-  search.
+  search. Without a Gold account the API allows 2 tags per search and `order:`
+  counts as one, so a two-tag AND search goes out without `order:` and three or
+  more combined tags are rejected up front.
 
 Each bot has a stable **internal name** (in parentheses) independent of its `.py`
 filename. It drives that bot's state/queue/settings/recent-post JSON file names,
@@ -101,9 +107,24 @@ contracts:
 - `recent_post_guard.py` — per-channel history (`recent_posts_<bot>.json`) with a
   lock file (`*.lock`) around read-prune-write, so concurrent bot processes don't
   race.
+- `danbooru_notifier_shared.py` — the notifier engine. Each cycle asks only for
+  posts created in the last `*_MAX_POST_AGE_DAYS` days (so re-tagged old posts
+  are not re-sent once their id leaves the 10000-id history) and pages back only
+  to `updated_cursor`, the start of the last complete cycle — usually one
+  request. The cursor only advances when a cycle has no transient failure, so a
+  failed post stays reachable. A state without a cursor re-bootstraps instead
+  of flooding. Three consecutive API failures send one operator alert.
+- `danbooru_client.py` — API HTTP (bounded retries on 429/5xx, honors
+  `Retry-After` up to 60s) and the single media policy shared by the notifier
+  and search: `photo_media_urls`, `photo_variant_metadata/rejection`, Telegram
+  photo limits, `post_url`/`build_caption`.
+- `telegram_common.py` — Telegram error classification shared by every bot
+  (`should_pause_for_telegram_error`, `telegram_retry_after_seconds`,
+  `rewind_media_arguments`).
 - `backup_state.py` — timestamped backups under `backups/state_<timestamp>/`,
-  plus retention cleanup (24h default, dry-run unless `--apply`). The posting bot
-  also runs this cleanup every 6h via `backup_loop()`; age is judged by the
+  plus retention cleanup (24h default, dry-run unless `--apply`). Each posting bot
+  runs `backup_loop()` every 6h: it skips the backup when another bot made one
+  less than 3h ago, and always runs the cleanup; age is judged by the
   folder-name timestamp, not mtime, since deleting files inside a folder bumps
   its mtime.
 
@@ -121,12 +142,12 @@ delete, reset, or casually overwrite them — back up with `backup_state.py` fir
 
 The notifier delivers **photos only, at good quality**. Three deliberate
 constraints, each enforced by `tests/test_notifier_photo_only.py` (which asserts
-on module source, so reintroducing any of them fails the suite):
+on `danbooru_notifier_shared` source, so reintroducing any of them fails the suite):
 
 - `photo_media_urls()` yields `file_url` (original) then `large_file_url`
   (sample), in that order — original first because Telegram rescales to 1280px,
   so a larger source survives better. `preview_file_url` is excluded everywhere
-  (a 180x180 thumbnail), including from `media_urls()`, so a post whose only
+  (a 180x180 thumbnail), including from `danbooru_client.media_url()`, so a post whose only
   media is a thumbnail is skipped rather than sent.
 - No `send_document` fallback anywhere. A post that fits no photo variant is
   dropped, not sent as a file; extensions that could only go as documents are
@@ -152,8 +173,9 @@ posts, or posts dropped forever after one network blip.
 
 Two Telegram wrappers coexist and are easy to conflate:
 
-- `call_telegram()` — for command replies. Honors the module-level API cooldown
-  (`API_FAILURE_COOLDOWN`, 300s): returns `None` without calling while paused,
+- `call_telegram()` — for command replies. Honors the per-bot API cooldown
+  (`API_FAILURE_COOLDOWN`, 300s, or Telegram's `retry_after` on a 429): returns
+  `None` without calling while paused,
   and arms the pause on transient failures.
 - `try_telegram()` / `try_telegram_detailed()` — for media sends. Bounded retry
   with backoff on transient errors; the `_detailed` variant also returns the

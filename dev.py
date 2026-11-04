@@ -160,6 +160,19 @@ def cmd_health(args):
                 _warn(f"{bot}.log: not found (bot may not have started)")
 
     print()
+    print("Temporary files:")
+    temp_files = sorted(ROOT.glob("*.tmp"))
+    if not temp_files:
+        _ok("no leftover *.tmp files")
+    for temp_file in temp_files:
+        mtime = datetime.fromtimestamp(temp_file.stat().st_mtime)
+        # Los deja una escritura atomica interrumpida; el archivo real no se toca.
+        _warn(
+            f"{temp_file.name}: leftover from an interrupted write ({mtime.strftime('%Y-%m-%d %H:%M')}); "
+            "safe to delete by hand once no bot is writing"
+        )
+
+    print()
     env_path = ROOT / ".env"
     if env_path.exists():
         _ok(".env file found")

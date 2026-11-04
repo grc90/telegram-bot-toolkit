@@ -93,6 +93,20 @@ def get_optional_env(name: str, default: str | None = None) -> str | None:
     return os.environ.get(name, default)
 
 
+def get_int_env(name: str, default: int) -> int:
+    """Integer override from the environment, or default when unset or empty."""
+
+    value = get_optional_env(name)
+
+    if value is None or value.strip() == "":
+        return default
+
+    try:
+        return int(value)
+    except ValueError as error:
+        raise RuntimeError(f"Environment variable {name} must be an integer.") from error
+
+
 def validate_telegram_token(name: str, value: str) -> None:
     """Raise RuntimeError if value does not look like a Telegram bot token.
 

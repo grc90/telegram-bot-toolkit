@@ -40,6 +40,19 @@ def test_health_exits_1_with_invalid_json(tmp_path, monkeypatch):
     assert result == 1
 
 
+def test_health_warns_about_leftover_tmp_files_without_failing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(dev, "ROOT", tmp_path)
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    leftover = tmp_path / "examplechannel_queue.json.abc123.tmp"
+    leftover.write_text("{}", encoding="utf-8")
+
+    result = dev.main(["health"])
+
+    assert result == 0
+    assert "examplechannel_queue.json.abc123.tmp" in capsys.readouterr().out
+    assert leftover.exists()  # dev.py es solo lectura: avisa, no borra
+
+
 def test_health_missing_env_returns_error(tmp_path, monkeypatch):
     monkeypatch.setattr(dev, "ROOT", tmp_path)
     # No .env file

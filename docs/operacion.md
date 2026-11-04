@@ -341,7 +341,8 @@ python backup_state.py --clean-queue-backups --apply
 | `IMAGEBOARD_NOTIFIER_TOP_SCORE_THRESHOLD` | imageboard_notifier | 20 | Score mínimo para `/top` |
 | `IMAGEBOARD_NOTIFIER_HOT_SCORE_THRESHOLD` | imageboard_notifier | 10 | Score mínimo para `/hot` |
 | `IMAGEBOARD_NOTIFIER_POLL_INTERVAL_SECONDS` | imageboard_notifier | 600 | Intervalo entre ciclos (segundos) |
-| `IMAGEBOARD_NOTIFIER_DANBOORU_PAGES` | imageboard_notifier | 10 | Páginas de Danbooru a consultar por ciclo |
+| `IMAGEBOARD_NOTIFIER_DANBOORU_PAGES` | imageboard_notifier | 10 | Máximo de páginas (de 200 posts) por ciclo. Normalmente se pide 1: se corta al llegar al cursor `updated_cursor` del estado; las 10 solo en bootstrap o tras un fallo de envío |
+| `IMAGEBOARD_NOTIFIER_MAX_POST_AGE_DAYS` | imageboard_notifier | 7 | Solo notifica posts creados hace <= N días; tiene que entrar holgado en la ventana de 10000 ids procesados |
 | `IMAGEBOARD_NOTIFIER_MAX_DOWNLOAD_BYTES` | imageboard_notifier | 51380224 | Límite de descarga por archivo (bytes) |
 | `IMAGEBOARD_SEARCH_MAX_DOWNLOAD_BYTES` | imageboard_search | 51380224 | Límite de descarga por archivo (bytes) |
 | `IMAGEBOARD_SEARCH_SEND_DELAY_SECONDS` | imageboard_search | 0.8 | Pausa entre envíos de una tirada |

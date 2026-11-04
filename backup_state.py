@@ -112,6 +112,27 @@ def parse_backup_folder_timestamp(folder_name: str) -> datetime | None:
         return None
 
 
+def latest_backup_age_seconds(backup_root: Path | None = None, now: datetime | None = None) -> float | None:
+    """Seconds since the newest ``state_<timestamp>`` backup folder was created, or None if there is none."""
+
+    backup_root = Path(backup_root) if backup_root else ROOT / "backups"
+    now = now or datetime.now()
+    newest = None
+
+    try:
+        entries = list(backup_root.iterdir())
+    except OSError:
+        return None
+
+    for entry in entries:
+        created_at = parse_backup_folder_timestamp(entry.name)
+
+        if created_at is not None and entry.is_dir() and (newest is None or created_at > newest):
+            newest = created_at
+
+    return None if newest is None else (now - newest).total_seconds()
+
+
 def find_old_queue_backup_files(
     retention_hours: float = DEFAULT_QUEUE_RETENTION_HOURS,
     backup_root: Path | None = None,

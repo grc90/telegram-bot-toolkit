@@ -41,8 +41,8 @@ script does not move any of its data.
 
 | File | Internal name | What it does |
 | --- | --- | --- |
-| [example_posting_bot.py](example_posting_bot.py) | `examplechannel` | Posts a queue to a channel on a schedule. ~150 lines: a config block plus a couple of channel-specific commands. |
-| [imageboard_notifier_bot.py](imageboard_notifier_bot.py) | `imageboard_notifier` | Polls the Danbooru API, filters by rating/score/tag blacklist, pushes new matches to subscribers. |
+| [example_posting_bot.py](example_posting_bot.py) | `examplechannel` | Posts a queue to a channel on a schedule. ~75 lines: a config block and `main()`. |
+| [imageboard_notifier_bot.py](imageboard_notifier_bot.py) | `imageboard_notifier` | Polls the Danbooru API, filters by rating/score/age/tag blacklist, pushes new matches to subscribers. A config file over `danbooru_notifier_shared.py`. |
 | [imageboard_search_bot.py](imageboard_search_bot.py) | `imageboard_search` | Interactive search: prompts the operator for tag, age, rating and ordering, then delivers the results. |
 
 The posting bot is deliberately thin. All of the engine — queue posting,
@@ -56,12 +56,14 @@ and changing two strings.
 | Module | Responsibility |
 | --- | --- |
 | [posting_bot_shared.py](posting_bot_shared.py) | The posting engine: `PostingBotApp` + `create_posting_bot()` factory. Queue, scheduling, rate limiting, commands, dry-run, backup loop. |
+| [danbooru_notifier_shared.py](danbooru_notifier_shared.py) | The notifier engine: `DanbooruNotifierApp` + `create_notifier_bot()` factory. Fetch and filters, photo delivery, handled-post state, polling cycle, commands. |
 | [json_storage.py](json_storage.py) | Atomic JSON read/write — temp file in the same directory, `fsync`, `os.replace` with retries. Raises `MalformedJsonError` / `JsonTypeError` instead of silently defaulting. |
 | [queue_dedupe.py](queue_dedupe.py) | Deterministic `post_signature()` per post: normalized source URL first, then Telegram `file_id` / `media_group_id`, then a stable JSON fallback. |
 | [recent_post_guard.py](recent_post_guard.py) | Per-channel repost history with a lock file around read-prune-write, so two bot processes cannot race. |
-| [danbooru_client.py](danbooru_client.py) | HTTP against the Danbooru API: bounded retries on 429/5xx, response validation, size-capped download into memory. |
+| [danbooru_client.py](danbooru_client.py) | HTTP against the Danbooru API: bounded retries on 429/5xx (honoring `Retry-After`), response validation, size-capped download into memory, and the photo-variant policy shared by the notifier and search. |
+| [telegram_common.py](telegram_common.py) | Telegram error classification (transient vs definitive, `retry_after`) shared by every bot. |
 | [tag_blacklist.py](tag_blacklist.py) | Wildcard (`*_suffix`) tag filter shared by the imageboard bots. |
-| [config_env.py](config_env.py) | Dependency-free `.env` loader with `get_required_env` / `validate_telegram_token`. |
+| [config_env.py](config_env.py) | Dependency-free `.env` loader with `get_required_env` / `get_int_env` / `validate_telegram_token`. |
 | [backup_state.py](backup_state.py) | Timestamped runtime-JSON backups plus retention cleanup (dry-run unless `--apply`). |
 | [bot_logging.py](bot_logging.py) | Rotating-file + console logger, one file per bot. |
 | [dev.py](dev.py) | Read-only diagnostics CLI. Never calls Telegram, never mutates state. |
@@ -92,10 +94,18 @@ every retry; [tests/test_notifier_send_retry.py](tests/test_notifier_send_retry.
 is there to keep it that way.
 
 **Two Telegram wrappers, on purpose.** `call_telegram()` is for command replies:
-it honors a module-level API cooldown and returns `None` without calling while
+it honors a per-bot API cooldown and returns `None` without calling while
 paused. `try_telegram()` is for media sends: bounded retry with backoff. They
 look interchangeable and are not — using the cooldown-aware one for a media send
 silently drops posts during an outage.
+
+**Polling pages back only to the last complete cycle.** The notifier keeps an
+`updated_cursor` in its state and stops paginating `order:updated` results once
+a page reaches posts older than it, so a normal cycle is one request instead of
+ten. The cursor only advances when nothing failed transiently: otherwise a
+failed post could fall outside the next cycle's pages and be lost. The query
+also carries `age:<=Nd`, because `order:updated` resurfaces old posts whenever
+someone re-tags them, long after their id left the handled-id history.
 
 **Backup age comes from the folder name, not `mtime`.** Deleting files inside a
 backup folder bumps its `mtime`, so `mtime`-based retention makes old folders
@@ -176,11 +186,11 @@ anything, so the bots only answer their operator.
 python -m pytest -q
 ```
 
-194 tests, fully synchronous, no network. Coverage is weighted toward the failure
+301 tests, fully synchronous, no network. Coverage is weighted toward the failure
 paths rather than the happy path: corrupt state recovery, atomic-write retries,
 concurrent recent-post access, rate limiting, dry-run isolation, and the photo
 delivery invariants. [tests/test_notifier_photo_only.py](tests/test_notifier_photo_only.py)
-asserts against module source, so reintroducing a `send_document` fallback or a
+asserts against the notifier engine's source, so reintroducing a `send_document` fallback or a
 thumbnail URL fails the suite rather than quietly changing what subscribers get.
 
 ## Deployment

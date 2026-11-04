@@ -46,6 +46,52 @@ def test_json_request_retries_transient_http_error(monkeypatch):
     assert calls["count"] == 2
 
 
+
+def _flaky_urlopen(status, headers, calls):
+    def fake_urlopen(request, timeout):
+        calls.append(1)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(request.full_url, status, "busy", headers, io.BytesIO())
+        return FakeResponse(json.dumps([{"id": 1}]).encode("utf-8"))
+
+    return fake_urlopen
+
+
+def test_json_request_waits_retry_after_when_longer_than_backoff(monkeypatch):
+    calls, sleeps = [], []
+    monkeypatch.setattr(danbooru_client.urllib.request, "urlopen", _flaky_urlopen(429, {"Retry-After": "7"}, calls))
+    monkeypatch.setattr(danbooru_client.time, "sleep", sleeps.append)
+
+    result = json_request("https://example.test", "/posts.json", {}, user_agent="test", retry_attempts=1)
+
+    assert result == [{"id": 1}]
+    assert sleeps == [7.0]
+
+
+def test_json_request_keeps_backoff_when_retry_after_is_shorter_or_a_date(monkeypatch):
+    for header in ("0.1", "Wed, 21 Oct 2026 07:28:00 GMT"):
+        calls, sleeps = [], []
+        monkeypatch.setattr(danbooru_client.urllib.request, "urlopen", _flaky_urlopen(503, {"Retry-After": header}, calls))
+        monkeypatch.setattr(danbooru_client.time, "sleep", sleeps.append)
+
+        json_request("https://example.test", "/posts.json", {}, user_agent="test", retry_attempts=1)
+
+        assert sleeps == [danbooru_client.DEFAULT_RETRY_DELAY_SECONDS]
+
+
+def test_json_request_does_not_wait_past_max_retry_after(monkeypatch):
+    calls, sleeps = [], []
+    too_long = str(danbooru_client.MAX_RETRY_AFTER_SECONDS + 1)
+    monkeypatch.setattr(danbooru_client.urllib.request, "urlopen", _flaky_urlopen(429, {"Retry-After": too_long}, calls))
+    monkeypatch.setattr(danbooru_client.time, "sleep", sleeps.append)
+
+    with pytest.raises(urllib.error.HTTPError):
+        json_request("https://example.test", "/posts.json", {}, user_agent="test", retry_attempts=2)
+
+    assert len(calls) == 1
+    assert sleeps == []
+
+
 def test_json_request_rejects_wrong_shape(monkeypatch):
     monkeypatch.setattr(
         danbooru_client.urllib.request,

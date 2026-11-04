@@ -14,17 +14,45 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import telebot
 from telebot import types
-from requests import exceptions as requests_exceptions
 
-from backup_state import DEFAULT_QUEUE_RETENTION_HOURS, clean_old_backup_folders, create_backup
+from backup_state import (
+    DEFAULT_QUEUE_RETENTION_HOURS,
+    clean_old_backup_folders,
+    create_backup,
+    latest_backup_age_seconds,
+)
 from bot_logging import get_bot_logger
 from config_env import validate_telegram_token
 from json_storage import JsonStorageError, read_json_file, write_json_atomic
 from queue_dedupe import dedupe_queue, normalize_source_url, post_signature, strip_twitter_tracking
 from recent_post_guard import filter_recent_posts, record_published_post, was_posted_recently
+from telegram_common import describe_telegram_error, should_pause_for_telegram_error, telegram_retry_after_seconds
 
 
 _BACKUP_INTERVAL_SECONDS = 6 * 3600  # 4 times per day
+
+# Resultado de publish_post. UNSENDABLE: Telegram rechazo este post en particular
+# y reintentarlo no cambia nada; FAILED: cualquier otro fallo, incluido uno que
+# podria afectar a todo el canal (el post vuelve a la queue).
+PUBLISH_RESULT_SENT = "sent"
+PUBLISH_RESULT_FAILED = "failed"
+PUBLISH_RESULT_UNSENDABLE = "unsendable"
+PUBLISH_RESULT_STOPPED = "stopped"
+
+# Rechazos 400 que dependen del post y no del canal. Lista cerrada a proposito: un
+# error desconocido (permisos, chat not found, ...) no debe vaciar la queue.
+POST_SPECIFIC_REJECTION_MARKERS = (
+    "wrong file identifier",
+    "wrong remote file identifier",
+    "wrong file_id",
+    "file reference",
+    "photo_invalid_dimensions",
+    "image_process_failed",
+    "media_empty",
+    "file must be non-empty",
+    "can't parse entities",
+    "group send failed",
+)
 
 
 def _escape_markdown_url_parens(url):
@@ -412,84 +440,49 @@ class PostingBotApp:
         with self.api_cooldown_lock:
             return time.time() < self.api_cooldown_until
 
-    def _retry_after_seconds(self, error) -> int | None:
-        """Extract Telegram's retry_after value from a 429 response, if present."""
-        try:
-            result = getattr(error, "result_json", None) or {}
-            params = result.get("parameters", {}) or {}
-            value = int(params.get("retry_after", 0))
-            return value if value > 0 else None
-        except Exception:
-            return None
-
     def pause_sending(self, context, error):
-        retry_after = self._retry_after_seconds(error)
+        retry_after = telegram_retry_after_seconds(error)
         cooldown = (retry_after + 2) if retry_after else self.api_failure_cooldown
         with self.api_cooldown_lock:
             self.api_cooldown_until = time.time() + cooldown
 
         self.log(
             f"{context}: transient Telegram failure "
-            f"({self.describe_telegram_error(error)}). "
+            f"({describe_telegram_error(error)}). "
             f"Pausing sends for {cooldown} seconds."
         )
         self.send_operator_alert(
-            f"⚠️ [{self.bot_name}] Telegram esta fallando ({self.describe_telegram_error(error)}). "
+            f"⚠️ [{self.bot_name}] Telegram esta fallando ({describe_telegram_error(error)}). "
             f"Pauso envios por {cooldown} segundos."
         )
 
-    def describe_telegram_error(self, error):
-        if isinstance(error, telebot.apihelper.ApiTelegramException):
-            return f"{type(error).__name__} {error.error_code}: {error.description}"
-
-        return type(error).__name__
-
-    def should_pause_for_telegram_error(self, error):
-        if isinstance(
-            error,
-            (
-                telebot.apihelper.ApiHTTPException,
-                requests_exceptions.RequestException,
-                TimeoutError,
-            ),
-        ):
-            return True
-
-        if not isinstance(error, telebot.apihelper.ApiTelegramException):
-            return False
-
-        description = (getattr(error, "description", "") or "").lower()
-        transient_markers = (
-            "timed out",
-            "timeout",
-            "temporarily unavailable",
-            "try again later",
-            "bad gateway",
-            "gateway timeout",
-            "service unavailable",
-            "too many requests",
-            "retry after",
-            "flood control",
-            "proxy",
-        )
-
-        return error.error_code >= 500 or any(marker in description for marker in transient_markers)
-
     def call_telegram(self, context, func, *args, **kwargs):
+        return self.call_telegram_detailed(context, func, *args, **kwargs)[0]
+
+    def call_telegram_detailed(self, context, func, *args, **kwargs):
+        """Like call_telegram, but returns (result, error) so callers can classify failures."""
+
         if self.sending_is_paused():
-            return None
+            return None, None
 
         try:
-            return func(*args, **kwargs)
+            return func(*args, **kwargs), None
         except Exception as error:
-            if self.should_pause_for_telegram_error(error):
+            if should_pause_for_telegram_error(error):
                 self.pause_sending(context, error)
             else:
                 self.log(
                     f"{context}: Telegram rejected request "
-                    f"({self.describe_telegram_error(error)}). Sends remain active."
+                    f"({describe_telegram_error(error)}). Sends remain active."
                 )
-            return None
+            return None, error
+
+    def is_unsendable_post_error(self, error):
+        if not isinstance(error, telebot.apihelper.ApiTelegramException) or error.error_code != 400:
+            return False
+
+        description = (getattr(error, "description", "") or "").lower()
+        return any(marker in description for marker in POST_SPECIFIC_REJECTION_MARKERS)
 
     def posting_is_stopped(self):
         return self.stop_posting_event.is_set()
@@ -954,10 +947,10 @@ class PostingBotApp:
 
         if not self.wait_for_rate_limit(message_units):
             self.log("Posting stopped before send could start.")
-            return None
+            return PUBLISH_RESULT_STOPPED
 
         if post["type"] == "photo":
-            sent = self.call_telegram(
+            sent, error = self.call_telegram_detailed(
                 "scheduled_send_photo",
                 self.bot.send_photo,
                 self.channel_id,
@@ -967,11 +960,11 @@ class PostingBotApp:
             )
             if sent and record_recent:
                 record_published_post(self.bot_name, post, window_days=self.recent_post_window_days)
-            return bool(sent)
+            return self.classify_publish(sent, error)
 
         if post["type"] == "media_group":
             media = [types.InputMediaPhoto(file_id) for file_id in post["file_ids"][:self.media_group_size]]
-            sent = self.call_telegram(
+            sent, error = self.call_telegram_detailed(
                 "scheduled_send_media_group",
                 self.bot.send_media_group,
                 self.channel_id,
@@ -990,10 +983,27 @@ class PostingBotApp:
             if sent and record_recent:
                 record_published_post(self.bot_name, post, window_days=self.recent_post_window_days)
 
-            return bool(sent)
+            return self.classify_publish(sent, error)
 
         self.log(f"Unknown post type: {post.get('type')}")
-        return True
+        return PUBLISH_RESULT_UNSENDABLE
+
+    def classify_publish(self, sent, error):
+        if sent:
+            return PUBLISH_RESULT_SENT
+
+        if error is not None and self.is_unsendable_post_error(error):
+            return PUBLISH_RESULT_UNSENDABLE
+
+        return PUBLISH_RESULT_FAILED
+
+    def report_unsendable_post(self, post):
+        source_url = post.get("source_url") or self.extract_source_url_from_caption(post.get("caption"))
+        self.log(f"Dropped unsendable {post.get('type')} post (source: {source_url or 'none'}).")
+        self.send_operator_alert(
+            f"⚠️ [{self.bot_name}] Telegram rechazo un post de la queue y lo descarte "
+            f"(ver log). Source: {source_url or 'sin source'}. Si lo queres publicar, reenvialo."
+        )
 
     def publish_batch(self, reason, max_posts=None):
         if not self.publish_lock.acquire(blocking=False):
@@ -1037,14 +1047,15 @@ class PostingBotApp:
 
                 publish_result = self.publish_post(post)
 
-                if publish_result:
+                if publish_result == PUBLISH_RESULT_SENT:
                     published_count += 1
                     self.log(f"Published scheduled {post['type']} post. Queue size: {remaining_queue_size}.")
                     if not self.wait_with_stop(self.batch_post_delay_seconds):
                         break
-                elif publish_result is None and self.posting_is_stopped():
-                    self.restore_post(post)
-                    break
+                elif publish_result == PUBLISH_RESULT_UNSENDABLE:
+                    # Ya salio de la queue en pop_next_post: no se restaura, asi no
+                    # vuelve a cortar lotes cada vez que el sorteo lo elige.
+                    self.report_unsendable_post(post)
                 else:
                     self.restore_post(post)
                     break
@@ -1102,15 +1113,14 @@ class PostingBotApp:
 
                 publish_result = self.publish_post(post)
 
-                if publish_result:
+                if publish_result == PUBLISH_RESULT_SENT:
                     published_count += 1
                     self.log(f"Published special {post['type']} post ({published_count}/{total_posts}).")
                     if index < total_posts - 1 and not self.wait_with_stop(self.batch_post_delay_seconds):
                         pending_posts = posts[index + 1 :]
                         break
-                elif publish_result is None and self.posting_is_stopped():
-                    pending_posts = posts[index:]
-                    break
+                elif publish_result == PUBLISH_RESULT_UNSENDABLE:
+                    self.report_unsendable_post(post)
                 else:
                     pending_posts = posts[index:]
                     break
@@ -1502,6 +1512,96 @@ class PostingBotApp:
                 )
                 self.log(f"Manual backup failed ({type(error).__name__}).")
 
+        def ack_posts_per_batch_auto_mode(chat_id, mode):
+            self.set_posts_per_batch(mode)
+            resolved_posts = self.resolve_posts_per_batch()
+            self.call_telegram(
+                "posts_per_batch_set_ack",
+                self.bot.send_message,
+                chat_id,
+                (
+                    f"Listo. posts_per_batch ahora es {mode} "
+                    f"({posts_per_batch_mode_hint(mode)} -> {resolved_posts} con la queue actual)."
+                ),
+            )
+
+        def handle_posts_per_batch_reply(message):
+            if not self.is_allowed_user(message):
+                return
+
+            raw_value = (message.text or "").strip().lower()
+
+            if raw_value in {"auto", "auto2"}:
+                ack_posts_per_batch_auto_mode(message.chat.id, raw_value)
+                return
+
+            try:
+                requested_posts = int(raw_value)
+            except ValueError:
+                self.call_telegram(
+                    "posts_per_batch_reply_invalid_ack",
+                    self.bot.send_message,
+                    message.chat.id,
+                    "No entendi el valor. Usa /posts_per_batch y responde con un entero mayor que 0, auto o auto2.",
+                )
+                return
+
+            if requested_posts <= 0:
+                self.call_telegram(
+                    "posts_per_batch_reply_invalid_range_ack",
+                    self.bot.send_message,
+                    message.chat.id,
+                    "El numero debe ser mayor que 0.",
+                )
+                return
+
+            self.set_posts_per_batch(requested_posts)
+            self.call_telegram(
+                "posts_per_batch_set_ack",
+                self.bot.send_message,
+                message.chat.id,
+                f"Listo. posts_per_batch ahora es {requested_posts}.",
+            )
+
+        @self.bot.message_handler(commands=["posts_per_batch"])
+        def handle_posts_per_batch(message):
+            if not self.is_allowed_user(message):
+                return
+
+            parts = (message.text or "").split(maxsplit=1)
+
+            if len(parts) > 1:
+                self.call_telegram(
+                    "posts_per_batch_invalid_ack",
+                    self.bot.send_message,
+                    message.chat.id,
+                    "Usa /posts_per_batch y responde despues con un numero mayor que 0, auto o auto2.",
+                )
+                return
+
+            sent_message = self.call_telegram(
+                "posts_per_batch_prompt_ack",
+                self.bot.send_message,
+                message.chat.id,
+                (
+                    f"posts_per_batch actual: {self.posts_per_batch_setting_label()}.\n"
+                    "Decime el nuevo valor que queres usar (numero entero mayor que 0, auto o auto2)."
+                ),
+            )
+
+            if sent_message:
+                self.bot.register_next_step_handler(sent_message, handle_posts_per_batch_reply)
+
+        @self.bot.message_handler(commands=["posts_per_batch_auto"])
+        def handle_posts_per_batch_auto(message):
+            if self.is_allowed_user(message):
+                ack_posts_per_batch_auto_mode(message.chat.id, "auto")
+
+        @self.bot.message_handler(commands=["posts_per_batch_auto2"])
+        def handle_posts_per_batch_auto2(message):
+            if self.is_allowed_user(message):
+                ack_posts_per_batch_auto_mode(message.chat.id, "auto2")
+
         @self.bot.message_handler(content_types=["photo"])
         def handle_photo(message):
             if not self.is_allowed_user(message):
@@ -1533,20 +1633,30 @@ class PostingBotApp:
         call from multiple bots concurrently; never raises for per-folder failures."""
         return clean_old_backup_folders(retention_hours=DEFAULT_QUEUE_RETENTION_HOURS, apply=True)
 
+    def backup_was_made_recently(self):
+        # Los 3 bots de posteo corren backup_loop y cada backup copia los archivos
+        # de todos: el primero que llega lo hace y los demas no lo duplican.
+        age = latest_backup_age_seconds()
+        return age is not None and 0 <= age < _BACKUP_INTERVAL_SECONDS / 2
+
     def backup_loop(self):
         while True:
             time.sleep(_BACKUP_INTERVAL_SECONDS)
-            try:
-                backup_dir = self.run_backup()
-                self.log(f"Automatic backup created at {backup_dir.name}.")
-                self.send_operator_alert(
-                    f"\U0001f4be [{self.bot_name}] Backup automático creado: {backup_dir.name}."
-                )
-            except Exception as error:
-                self.log(f"Automatic backup failed ({type(error).__name__}).")
-                self.send_operator_alert(
-                    f"⚠️ [{self.bot_name}] Backup automático falló ({type(error).__name__})."
-                )
+
+            if self.backup_was_made_recently():
+                self.log("Automatic backup skipped: another bot made one recently.")
+            else:
+                try:
+                    backup_dir = self.run_backup()
+                    self.log(f"Automatic backup created at {backup_dir.name}.")
+                    self.send_operator_alert(
+                        f"\U0001f4be [{self.bot_name}] Backup automático creado: {backup_dir.name}."
+                    )
+                except Exception as error:
+                    self.log(f"Automatic backup failed ({type(error).__name__}).")
+                    self.send_operator_alert(
+                        f"⚠️ [{self.bot_name}] Backup automático falló ({type(error).__name__})."
+                    )
 
             try:
                 report = self.run_backup_retention_cleanup()

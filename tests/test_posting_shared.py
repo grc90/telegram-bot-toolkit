@@ -117,6 +117,66 @@ def test_help_lists_all_registered_commands(make_posting_app):
         assert f"/{command}" in text
 
 
+
+# ---------------------------------------------------------------------------
+# /posts_per_batch lives in the shared engine (same behavior for every channel)
+# ---------------------------------------------------------------------------
+
+class _OperatorMessage:
+    def __init__(self, text):
+        self.text = text
+        self.chat = Mock(id=1)
+        self.from_user = Mock(id=1)
+
+
+def test_posts_per_batch_auto_commands_set_mode_and_persist(make_posting_app, tmp_path):
+    app = make_posting_app(posts_per_batch=3)
+    app.bot.send_message = Mock()
+
+    _command_handler(app, "posts_per_batch_auto2")(_OperatorMessage("/posts_per_batch_auto2"))
+
+    assert app.posts_per_batch == "auto2"
+    assert json.loads((tmp_path / "settings.json").read_text())["posts_per_batch"] == "auto2"
+    assert "auto2" in app.bot.send_message.call_args[0][1]
+
+
+def test_posts_per_batch_prompt_then_numeric_reply(make_posting_app):
+    app = make_posting_app(posts_per_batch=3)
+    app.bot.send_message = Mock(return_value=Mock())
+    captured = {}
+    app.bot.register_next_step_handler = lambda message, handler: captured.setdefault("handler", handler)
+
+    _command_handler(app, "posts_per_batch")(_OperatorMessage("/posts_per_batch"))
+    captured["handler"](_OperatorMessage("7"))
+
+    assert app.posts_per_batch == 7
+    assert app.bot.send_message.call_args[0][1] == "Listo. posts_per_batch ahora es 7."
+
+
+@pytest.mark.parametrize("reply", ["0", "abc"])
+def test_posts_per_batch_reply_rejects_invalid_values(make_posting_app, reply):
+    app = make_posting_app(posts_per_batch=3)
+    app.bot.send_message = Mock(return_value=Mock())
+    captured = {}
+    app.bot.register_next_step_handler = lambda message, handler: captured.setdefault("handler", handler)
+
+    _command_handler(app, "posts_per_batch")(_OperatorMessage("/posts_per_batch"))
+    captured["handler"](_OperatorMessage(reply))
+
+    assert app.posts_per_batch == 3
+
+
+def test_posts_per_batch_ignores_other_users(make_posting_app):
+    app = make_posting_app(posts_per_batch=3)
+    app.bot.send_message = Mock()
+    message = _OperatorMessage("/posts_per_batch_auto")
+    message.from_user = Mock(id=999)
+
+    _command_handler(app, "posts_per_batch_auto")(message)
+
+    assert app.posts_per_batch == 3
+    app.bot.send_message.assert_not_called()
+
 # ---------------------------------------------------------------------------
 # /post_now xN multiplies the effective batch size
 # ---------------------------------------------------------------------------
@@ -393,6 +453,83 @@ def test_publish_batch_restores_post_on_telegram_failure(no_recent_history, monk
     assert len(queue) == 1
 
 
+def _telegram_400(description):
+    return posting_bot_shared.telebot.apihelper.ApiTelegramException(
+        "sendPhoto", Mock(), {"error_code": 400, "description": description}
+    )
+
+
+def _app_with_queue(make_posting_app, tmp_path, monkeypatch, posts, **overrides):
+    monkeypatch.setattr(posting_bot_shared, "record_published_post", lambda *a, **k: None)
+    app = make_posting_app(**overrides)
+    (tmp_path / "queue.json").write_text(json.dumps(posts), encoding="utf-8")
+    alerts = []
+    app.send_operator_alert = alerts.append
+    return app, alerts
+
+
+def test_publish_batch_drops_unsendable_post_and_keeps_going(no_recent_history, monkeypatch, make_posting_app, tmp_path):
+    bad, good = _photo("https://example.test/bad", "bad"), _photo("https://example.test/good", "good")
+    app, alerts = _app_with_queue(make_posting_app, tmp_path, monkeypatch, [bad, good])
+
+    def send_photo(channel_id, file_id, **kwargs):
+        if file_id == "bad":
+            raise _telegram_400("Bad Request: wrong file identifier/HTTP URL specified")
+        return Mock()
+
+    app.bot.send_photo = send_photo
+
+    assert app.publish_batch("test", max_posts=2) == 1
+    assert json.loads((tmp_path / "queue.json").read_text()) == []
+    assert len(alerts) == 1
+    assert "https://example.test/bad" in alerts[0]
+
+
+def test_publish_batch_keeps_queue_on_channel_wide_rejection(no_recent_history, monkeypatch, make_posting_app, tmp_path):
+    first, second = _photo("https://example.test/1", "a"), _photo("https://example.test/2", "b")
+    app, alerts = _app_with_queue(make_posting_app, tmp_path, monkeypatch, [first, second])
+    app.bot.send_photo = Mock(side_effect=_telegram_400("Bad Request: chat not found"))
+
+    assert app.publish_batch("test", max_posts=2) == 0
+    # Un error de canal no puede vaciar la queue: se restaura y se corta el lote.
+    assert len(json.loads((tmp_path / "queue.json").read_text())) == 2
+    assert app.bot.send_photo.call_count == 1
+    assert alerts == []
+
+
+def test_publish_batch_drops_unsendable_media_group(no_recent_history, monkeypatch, make_posting_app, tmp_path):
+    album = {
+        "type": "media_group",
+        "file_ids": ["x", "y"],
+        "source_url": "https://example.test/album",
+        "caption": "[Source](https://example.test/album)",
+        "created_at": 1.0,
+    }
+    app, alerts = _app_with_queue(make_posting_app, tmp_path, monkeypatch, [album])
+    app.bot.send_media_group = Mock(side_effect=_telegram_400("Bad Request: group send failed"))
+
+    assert app.publish_batch("test", max_posts=1) == 0
+    assert json.loads((tmp_path / "queue.json").read_text()) == []
+    assert len(alerts) == 1
+
+
+def test_publish_special_batch_drops_unsendable_post(no_recent_history, monkeypatch, make_posting_app, tmp_path):
+    app, alerts = _app_with_queue(make_posting_app, tmp_path, monkeypatch, [])
+    app.enqueue_special_post(_photo("https://example.test/bad", "bad"))
+    app.enqueue_special_post(_photo("https://example.test/good", "good"))
+
+    def send_photo(channel_id, file_id, **kwargs):
+        if file_id == "bad":
+            raise _telegram_400("Bad Request: PHOTO_INVALID_DIMENSIONS")
+        return Mock()
+
+    app.bot.send_photo = send_photo
+
+    assert app.publish_special_batch("test") == 1
+    assert app.special_queue_size() == 0
+    assert len(alerts) == 1
+
+
 # ---------------------------------------------------------------------------
 # special mode
 # ---------------------------------------------------------------------------
@@ -503,6 +640,7 @@ class _StopLoop(Exception):
 def test_backup_loop_runs_retention_cleanup_after_backup(monkeypatch, make_posting_app):
     app = make_posting_app()
     monkeypatch.setattr(posting_bot_shared.time, "sleep", Mock(side_effect=[None, _StopLoop()]))
+    monkeypatch.setattr(app, "backup_was_made_recently", lambda: False)
     monkeypatch.setattr(app, "run_backup", lambda: Mock(name="backup_dir"))
     cleanup_calls = []
     monkeypatch.setattr(
@@ -521,6 +659,7 @@ def test_backup_loop_runs_retention_cleanup_after_backup(monkeypatch, make_posti
 def test_backup_loop_alerts_when_cleanup_has_failures(monkeypatch, make_posting_app):
     app = make_posting_app()
     monkeypatch.setattr(posting_bot_shared.time, "sleep", Mock(side_effect=[None, _StopLoop()]))
+    monkeypatch.setattr(app, "backup_was_made_recently", lambda: False)
     monkeypatch.setattr(app, "run_backup", lambda: Mock(name="backup_dir"))
     monkeypatch.setattr(
         app,
@@ -539,6 +678,7 @@ def test_backup_loop_alerts_when_cleanup_has_failures(monkeypatch, make_posting_
 def test_backup_loop_cleanup_failure_does_not_crash_loop(monkeypatch, make_posting_app):
     app = make_posting_app()
     monkeypatch.setattr(posting_bot_shared.time, "sleep", Mock(side_effect=[None, _StopLoop()]))
+    monkeypatch.setattr(app, "backup_was_made_recently", lambda: False)
     monkeypatch.setattr(app, "run_backup", lambda: Mock(name="backup_dir"))
 
     def _boom():
@@ -550,6 +690,34 @@ def test_backup_loop_cleanup_failure_does_not_crash_loop(monkeypatch, make_posti
     with pytest.raises(_StopLoop):
         app.backup_loop()
 
+
+
+def test_backup_loop_skips_backup_another_bot_just_made_but_still_cleans(monkeypatch, make_posting_app):
+    app = make_posting_app()
+    monkeypatch.setattr(posting_bot_shared.time, "sleep", Mock(side_effect=[None, _StopLoop()]))
+    monkeypatch.setattr(app, "backup_was_made_recently", lambda: True)
+    backups, cleanups, alerts = [], [], []
+    monkeypatch.setattr(app, "run_backup", lambda: backups.append(1))
+    monkeypatch.setattr(
+        app, "run_backup_retention_cleanup", lambda: cleanups.append(1) or {"kept": [], "to_delete": [], "failed": []}
+    )
+    monkeypatch.setattr(app, "send_operator_alert", alerts.append)
+
+    with pytest.raises(_StopLoop):
+        app.backup_loop()
+
+    assert backups == []
+    assert cleanups == [1]
+    assert alerts == []
+
+
+@pytest.mark.parametrize("age_hours, expected", [(None, False), (1, True), (2.9, True), (3.1, False), (-1, False)])
+def test_backup_was_made_recently_uses_half_the_interval(monkeypatch, make_posting_app, age_hours, expected):
+    app = make_posting_app()
+    age = None if age_hours is None else age_hours * 3600
+    monkeypatch.setattr(posting_bot_shared, "latest_backup_age_seconds", lambda: age)
+
+    assert app.backup_was_made_recently() is expected
 
 # ---------------------------------------------------------------------------
 # /delete — remove a queued post by its source URL

@@ -2,7 +2,8 @@
 
 import json
 
-import imageboard_notifier_bot as dangbot
+from imageboard_notifier_bot import APP as dangbot
+import danbooru_notifier_shared as shared
 
 
 # ---------------------------------------------------------------------------
@@ -10,7 +11,7 @@ import imageboard_notifier_bot as dangbot
 # ---------------------------------------------------------------------------
 
 def test_load_state_returns_defaults_for_missing_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(dangbot, "STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(dangbot, "state_file", str(tmp_path / "state.json"))
     state = dangbot.get_state()
     assert state["bootstrapped"] is False
     assert state["handled_post_ids"] == []
@@ -21,7 +22,7 @@ def test_load_state_returns_defaults_for_missing_file(monkeypatch, tmp_path):
 def test_load_state_handles_corrupt_json(monkeypatch, tmp_path):
     state_file = tmp_path / "state.json"
     state_file.write_text("{bad json", encoding="utf-8")
-    monkeypatch.setattr(dangbot, "STATE_FILE", str(state_file))
+    monkeypatch.setattr(dangbot, "state_file", str(state_file))
     alerts = []
     monkeypatch.setattr(dangbot, "send_operator_alert", lambda message: alerts.append(message))
 
@@ -42,16 +43,16 @@ def test_load_state_restores_from_latest_backup(monkeypatch, tmp_path):
 
     state_file = tmp_path / "state.json"
     state_file.write_text("{bad json", encoding="utf-8")
-    monkeypatch.setattr(dangbot, "STATE_FILE", str(state_file))
+    monkeypatch.setattr(dangbot, "state_file", str(state_file))
 
     backups_root = tmp_path / "backups"
     older_backup = backups_root / "state_20260101_000000"
     newer_backup = backups_root / "state_20260102_000000"
     older_backup.mkdir(parents=True)
     newer_backup.mkdir(parents=True)
-    write_json_atomic(older_backup / "state.json", dangbot.default_state())
-    good_state = dangbot.default_state()
-    good_state["subscriber_chat_ids"] = [dangbot.ALLOWED_USER_ID]
+    write_json_atomic(older_backup / "state.json", shared.default_state())
+    good_state = shared.default_state()
+    good_state["subscriber_chat_ids"] = [dangbot.allowed_user_id]
     good_state["bootstrapped"] = True
     write_json_atomic(newer_backup / "state.json", good_state)
 
@@ -61,7 +62,7 @@ def test_load_state_restores_from_latest_backup(monkeypatch, tmp_path):
     state = dangbot.get_state()
 
     assert state["bootstrapped"] is True
-    assert state["subscriber_chat_ids"] == [dangbot.ALLOWED_USER_ID]
+    assert state["subscriber_chat_ids"] == [dangbot.allowed_user_id]
     assert len(alerts) == 1
     assert "state_20260102_000000" in alerts[0]
     # The corrupted file on disk must have been repaired with the restored state.
@@ -71,7 +72,7 @@ def test_load_state_restores_from_latest_backup(monkeypatch, tmp_path):
 def test_load_state_alerts_when_backup_also_fails(monkeypatch, tmp_path):
     state_file = tmp_path / "state.json"
     state_file.write_text("{bad json", encoding="utf-8")
-    monkeypatch.setattr(dangbot, "STATE_FILE", str(state_file))
+    monkeypatch.setattr(dangbot, "state_file", str(state_file))
 
     backups_root = tmp_path / "backups"
     broken_backup = backups_root / "state_20260101_000000"
@@ -98,7 +99,7 @@ def test_load_state_normalizes_duplicate_ids(monkeypatch, tmp_path):
         "subscriber_chat_ids": [],
         "last_check_at": None,
     })
-    monkeypatch.setattr(dangbot, "STATE_FILE", state_file)
+    monkeypatch.setattr(dangbot, "state_file", state_file)
     state = dangbot.get_state()
     assert state["handled_post_ids"].count("1") == 1
     assert len(state["handled_post_ids"]) == 3
@@ -109,7 +110,7 @@ def test_load_state_normalizes_duplicate_ids(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_mark_handled_adds_ids(monkeypatch, tmp_path):
-    monkeypatch.setattr(dangbot, "STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(dangbot, "state_file", str(tmp_path / "state.json"))
     dangbot.mark_handled(["10", "20"])
     state = dangbot.get_state()
     assert "10" in state["handled_post_ids"]
@@ -117,14 +118,14 @@ def test_mark_handled_adds_ids(monkeypatch, tmp_path):
 
 
 def test_mark_handled_deduplicates_within_call(monkeypatch, tmp_path):
-    monkeypatch.setattr(dangbot, "STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(dangbot, "state_file", str(tmp_path / "state.json"))
     dangbot.mark_handled(["1", "2", "1"])
     state = dangbot.get_state()
     assert state["handled_post_ids"].count("1") == 1
 
 
 def test_mark_handled_does_not_duplicate_on_second_call(monkeypatch, tmp_path):
-    monkeypatch.setattr(dangbot, "STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(dangbot, "state_file", str(tmp_path / "state.json"))
     dangbot.mark_handled(["1"])
     dangbot.mark_handled(["1", "2"])
     state = dangbot.get_state()
@@ -144,10 +145,10 @@ def _sample_posts():
 
 
 def test_bootstrap_marks_posts_without_sending(monkeypatch, tmp_path):
-    monkeypatch.setattr(dangbot, "STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(dangbot, "state_file", str(tmp_path / "state.json"))
     send_calls = []
-    monkeypatch.setattr(dangbot, "fetch_matching_posts", _sample_posts)
-    monkeypatch.setattr(dangbot, "send_post_to_subscribers", lambda p: send_calls.append(p["id"]) or dangbot.SEND_RESULT_SENT)
+    monkeypatch.setattr(dangbot, "fetch_matching_posts", lambda **kwargs: _sample_posts())
+    monkeypatch.setattr(dangbot, "send_post_to_subscribers", lambda p: send_calls.append(p["id"]) or shared.SEND_RESULT_SENT)
 
     result = dangbot.check_danbooru_once("test-bootstrap")
 
@@ -160,17 +161,17 @@ def test_bootstrap_marks_posts_without_sending(monkeypatch, tmp_path):
 
 
 def test_second_check_sends_only_new_posts(monkeypatch, tmp_path):
-    monkeypatch.setattr(dangbot, "STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(dangbot, "state_file", str(tmp_path / "state.json"))
 
     # Bootstrap with post 1
-    monkeypatch.setattr(dangbot, "fetch_matching_posts", lambda: [_sample_posts()[0]])
-    monkeypatch.setattr(dangbot, "send_post_to_subscribers", lambda p: dangbot.SEND_RESULT_SENT)
+    monkeypatch.setattr(dangbot, "fetch_matching_posts", lambda **kwargs: [_sample_posts()[0]])
+    monkeypatch.setattr(dangbot, "send_post_to_subscribers", lambda p: shared.SEND_RESULT_SENT)
     dangbot.check_danbooru_once("bootstrap")
 
     # Second check: post 1 known, post 2 is new
     sent_ids = []
-    monkeypatch.setattr(dangbot, "fetch_matching_posts", _sample_posts)
-    monkeypatch.setattr(dangbot, "send_post_to_subscribers", lambda p: sent_ids.append(p["id"]) or dangbot.SEND_RESULT_SENT)
+    monkeypatch.setattr(dangbot, "fetch_matching_posts", lambda **kwargs: _sample_posts())
+    monkeypatch.setattr(dangbot, "send_post_to_subscribers", lambda p: sent_ids.append(p["id"]) or shared.SEND_RESULT_SENT)
     result = dangbot.check_danbooru_once("second")
 
     assert result == 1
@@ -179,17 +180,17 @@ def test_second_check_sends_only_new_posts(monkeypatch, tmp_path):
 
 
 def test_filter_signature_change_triggers_rebootstrap(monkeypatch, tmp_path):
-    monkeypatch.setattr(dangbot, "STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(dangbot, "state_file", str(tmp_path / "state.json"))
     posts = _sample_posts()
 
-    monkeypatch.setattr(dangbot, "fetch_matching_posts", lambda: posts)
-    monkeypatch.setattr(dangbot, "send_post_to_subscribers", lambda p: dangbot.SEND_RESULT_SENT)
+    monkeypatch.setattr(dangbot, "fetch_matching_posts", lambda **kwargs: posts)
+    monkeypatch.setattr(dangbot, "send_post_to_subscribers", lambda p: shared.SEND_RESULT_SENT)
     dangbot.check_danbooru_once("bootstrap")
 
     # Simulate blacklist change
     monkeypatch.setattr(dangbot, "filter_signature", lambda: "new_signature_after_blacklist_change")
     sent_ids = []
-    monkeypatch.setattr(dangbot, "send_post_to_subscribers", lambda p: sent_ids.append(p["id"]) or dangbot.SEND_RESULT_SENT)
+    monkeypatch.setattr(dangbot, "send_post_to_subscribers", lambda p: sent_ids.append(p["id"]) or shared.SEND_RESULT_SENT)
     result = dangbot.check_danbooru_once("after-change")
 
     assert result == 0  # re-bootstrap, no sends
@@ -203,7 +204,7 @@ def test_filter_signature_change_triggers_rebootstrap(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_dangbot_status_shows_cooldown_active(monkeypatch, tmp_path):
-    monkeypatch.setattr(dangbot, "STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(dangbot, "state_file", str(tmp_path / "state.json"))
     monkeypatch.setattr(dangbot, "sending_is_paused", lambda: True)
     sent = []
     monkeypatch.setattr(dangbot, "call_telegram", lambda context, func, chat_id, text: sent.append(text))
@@ -215,7 +216,7 @@ def test_dangbot_status_shows_cooldown_active(monkeypatch, tmp_path):
             id = 1
 
         class from_user:
-            id = dangbot.ALLOWED_USER_ID
+            id = dangbot.allowed_user_id
 
     dangbot.handle_status(FakeMessage())
 
@@ -224,7 +225,7 @@ def test_dangbot_status_shows_cooldown_active(monkeypatch, tmp_path):
 
 
 def test_dangbot_status_shows_cooldown_inactive(monkeypatch, tmp_path):
-    monkeypatch.setattr(dangbot, "STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(dangbot, "state_file", str(tmp_path / "state.json"))
     monkeypatch.setattr(dangbot, "sending_is_paused", lambda: False)
     sent = []
     monkeypatch.setattr(dangbot, "call_telegram", lambda context, func, chat_id, text: sent.append(text))
@@ -236,7 +237,7 @@ def test_dangbot_status_shows_cooldown_inactive(monkeypatch, tmp_path):
             id = 1
 
         class from_user:
-            id = dangbot.ALLOWED_USER_ID
+            id = dangbot.allowed_user_id
 
     dangbot.handle_status(FakeMessage())
 
@@ -252,13 +253,13 @@ def _fake_message(bot_module):
             id = 1
 
         class from_user:
-            id = bot_module.ALLOWED_USER_ID
+            id = bot_module.allowed_user_id
 
     return FakeMessage()
 
 
 def test_dangbot_stop_does_not_unsubscribe(monkeypatch, tmp_path):
-    monkeypatch.setattr(dangbot, "STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(dangbot, "state_file", str(tmp_path / "state.json"))
     dangbot.update_state(lambda state: state["subscriber_chat_ids"].append("1"))
     sent = []
     monkeypatch.setattr(dangbot, "call_telegram", lambda context, func, chat_id, text: sent.append(text))
@@ -270,7 +271,7 @@ def test_dangbot_stop_does_not_unsubscribe(monkeypatch, tmp_path):
 
 
 def test_dangbot_unsubscribe_still_unsubscribes(monkeypatch, tmp_path):
-    monkeypatch.setattr(dangbot, "STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(dangbot, "state_file", str(tmp_path / "state.json"))
     dangbot.update_state(lambda state: state["subscriber_chat_ids"].append("1"))
     sent = []
     monkeypatch.setattr(dangbot, "call_telegram", lambda context, func, chat_id, text: sent.append(text))
@@ -279,3 +280,37 @@ def test_dangbot_unsubscribe_still_unsubscribes(monkeypatch, tmp_path):
 
     assert "1" not in dangbot.get_state()["subscriber_chat_ids"]
     assert "Desuscripto" in sent[0]
+
+
+# ---------------------------------------------------------------------------
+# Shared engine: filters and texts come from the notifier's config
+# ---------------------------------------------------------------------------
+
+def test_query_is_built_from_config():
+    assert dangbot.tag_query == (
+        f"rating:g score:>={dangbot.score_threshold} age:<={dangbot.max_post_age_days}d order:updated"
+    )
+
+
+def test_help_and_status_use_the_configured_score_band(monkeypatch, tmp_path):
+    monkeypatch.setattr(dangbot, "state_file", str(tmp_path / "state.json"))
+    sent = []
+    monkeypatch.setattr(dangbot, "call_telegram", lambda context, func, chat_id, text, **kwargs: sent.append(text))
+
+    dangbot.handle_help(_fake_message(dangbot))
+    dangbot.handle_status(_fake_message(dangbot))
+
+    assert "score 5-10" in sent[0]
+    assert "score 5-10" in sent[1]
+
+
+def test_all_commands_are_registered():
+    registered = {
+        command
+        for handler in dangbot.bot.message_handlers
+        for command in (handler["filters"].get("commands") or [])
+    }
+
+    assert {"start", "subscribe", "unsubscribe", "stop", "check", "test", "last6", "g6", "top", "hot",
+            "help", "blacklist", "status"} <= registered
+

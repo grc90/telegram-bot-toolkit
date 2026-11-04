@@ -15,7 +15,6 @@ import re
 import threading
 import time
 import urllib.error
-import urllib.parse
 
 import telebot
 from telebot import types
@@ -23,8 +22,23 @@ from telebot import types
 from bot_logging import get_bot_logger
 from config_env import get_required_env
 from tag_blacklist import BLACKLISTED_TAGS, has_blacklisted_tag
-from danbooru_client import download_media_to_memory, json_request, media_url as danbooru_media_url, validate_post
+from danbooru_client import (
+    DANBOORU_BASE_URL,
+    PHOTO_EXTENSIONS,
+    TELEGRAM_PHOTO_MAX_BYTES,
+    TELEGRAM_PHOTO_URL_MAX_BYTES,
+    build_caption,
+    download_media_to_memory,
+    json_request,
+    media_size,
+    media_url,
+    photo_media_urls,
+    photo_variant_metadata,
+    photo_variant_rejection,
+    validate_post,
+)
 from json_storage import JsonStorageError, read_json_file, write_json_atomic
+from telegram_common import should_pause_for_telegram_error
 
 API_TOKEN = get_required_env("IMAGEBOARD_SEARCH_TELEGRAM_TOKEN")
 BOT_NAME = "imageboard_search"
@@ -32,7 +46,6 @@ BOT_VERSION = "2026-09-21-inline-query-1"
 ALLOWED_USER_ID = get_required_env("BOTS_ALLOWED_USER_ID")
 SESSION_STATE_FILE = os.path.join(os.path.dirname(__file__), "imageboard_search_state.json")
 
-DANBOORU_BASE_URL = "https://danbooru.donmai.us"
 DANBOORU_LIMIT = 100
 TAG_SUGGESTION_LIMIT = 8
 TAG_SUGGESTION_FETCH_LIMIT = 30
@@ -65,6 +78,16 @@ ALLOWED_ORDERS = {
     "rank",
     "id",
     "id_desc",
+}
+
+# Tags por busqueda para usuarios sin cuenta Gold (help:users). Los metatags de
+# FREE_METATAGS no cuentan (help:cheatsheet); order: si cuenta.
+DANBOORU_TAG_LIMIT = 2
+FREE_METATAGS = {
+    "rating", "status", "is", "age", "date", "id", "limit", "score", "downvotes",
+    "favcount", "width", "height", "ratio", "mpixels", "filesize", "filetype",
+    "duration", "md5", "pixiv_id", "pixiv", "parent", "child", "upvote",
+    "embedded", "tagcount",
 }
 
 bot = telebot.TeleBot(API_TOKEN or "0:missing", parse_mode="HTML")
@@ -110,35 +133,6 @@ def danbooru_request(path, params):
     )
 
 
-def post_url(post):
-    return f"{DANBOORU_BASE_URL}/posts/{post['id']}"
-
-
-def media_url(post):
-    return danbooru_media_url(post)
-
-
-def normalize_source_url(source):
-    if not source:
-        return ""
-
-    parsed = urllib.parse.urlparse(source)
-    host = parsed.netloc.lower()
-    path = parsed.path
-
-    pixiv_match = re.search(r"/(\d+)_p\d+\.[a-z0-9]+$", path, re.IGNORECASE)
-
-    if pixiv_match and host.endswith("pximg.net"):
-        return f"https://www.pixiv.net/artworks/{pixiv_match.group(1)}"
-
-    return source
-
-
-def build_caption(post):
-    source = normalize_source_url(post.get("source") or "")
-    return html.escape(source or post_url(post), quote=False)
-
-
 def download_media(url):
     return download_media_to_memory(
         url,
@@ -157,11 +151,66 @@ def try_send(context, func, *args, **kwargs):
 
 
 def _telegram_rejected_url(error):
-    """True only when Telegram responded with a 4xx error (definitive URL rejection)."""
+    """True only for a definitive 4xx rejection; a 429 (flood control) is transient."""
     return (
         isinstance(error, telebot.apihelper.ApiTelegramException)
         and 400 <= error.error_code < 500
+        and not should_pause_for_telegram_error(error)
     )
+
+
+def send_photo_post(chat_id, post, caption):
+    """Send a photo at the best quality Telegram accepts, never as a document.
+
+    Same variant policy as the notifiers: original first, then the sample, never
+    the 180x180 preview. Each variant goes by URL when Telegram can fetch it
+    (<= 5 MB); otherwise, or if Telegram rejects the URL, it is downloaded and
+    uploaded (<= 10 MB).
+    """
+
+    variant_metadata = photo_variant_metadata(post)
+    fail_reason = "no_media_url"
+
+    for image_url in photo_media_urls(post):
+        width, height, file_size = variant_metadata.get(image_url, (None, None, None))
+
+        if photo_variant_rejection(width, height, file_size):
+            fail_reason = "photo_limits"
+            continue
+
+        if not file_size or file_size <= TELEGRAM_PHOTO_URL_MAX_BYTES:
+            sent, error = try_send("send_photo", bot.send_photo, chat_id, image_url, caption=caption)
+
+            if sent:
+                return True, None
+
+            # Sin un rechazo 4xx definitivo la foto pudo llegar igual (timeout):
+            # subirla o probar otra variante la duplicaria.
+            if not _telegram_rejected_url(error):
+                return False, "send_failed"
+
+        try:
+            downloaded_media = download_media(image_url)
+        except Exception as error:
+            log(f"download_media failed for post {post.get('id')} ({type(error).__name__}: {error}).")
+            fail_reason = "too_large" if "too large" in str(error) else "download_failed"
+            continue
+
+        if media_size(downloaded_media) > TELEGRAM_PHOTO_MAX_BYTES:
+            fail_reason = "photo_limits"
+            continue
+
+        sent, error = try_send("upload_photo", bot.send_photo, chat_id, downloaded_media, caption=caption)
+
+        if sent:
+            return True, None
+
+        if not _telegram_rejected_url(error):
+            return False, "send_failed"
+
+        fail_reason = "send_failed"
+
+    return False, fail_reason
 
 
 def send_post_to_chat(chat_id, post):
@@ -179,14 +228,12 @@ def send_post_to_chat(chat_id, post):
         return False, "no_media_url"
 
     extension = (post.get("file_ext") or url.rsplit(".", 1)[-1]).lower()
+
+    if extension in PHOTO_EXTENSIONS:
+        return send_photo_post(chat_id, post, caption)
+
     url_send_attempted = False
     url_send_error = None
-
-    if extension in {"jpg", "jpeg", "png", "webp"}:
-        url_send_attempted = True
-        sent, url_send_error = try_send("send_photo", bot.send_photo, chat_id, url, caption=caption)
-        if sent:
-            return True, None
 
     if extension == "gif":
         url_send_attempted = True
@@ -211,13 +258,6 @@ def send_post_to_chat(chat_id, post):
         log(f"download_media failed for post {post.get('id')} ({type(error).__name__}: {error}).")
         reason = "too_large" if "too large" in str(error) else "download_failed"
         return False, reason
-
-    if extension in {"jpg", "jpeg", "png", "webp"}:
-        sent, _ = try_send("upload_photo", bot.send_photo, chat_id, downloaded_media, caption=caption)
-        if sent:
-            return True, None
-
-    downloaded_media.seek(0)
 
     if extension == "gif":
         sent, _ = try_send("upload_animation", bot.send_animation, chat_id, downloaded_media, caption=caption)
@@ -681,8 +721,31 @@ def handle_inline_tag_query(inline_query):
     )
 
 
+def count_limited_tags(tags):
+    # Lo que Danbooru suma al limite: tags normales (con -, ~ o comodin) y
+    # metatags no gratuitos.
+    count = 0
+
+    for term in (tags or "").split():
+        prefix, separator, _ = term.lstrip("-~").partition(":")
+
+        if separator and prefix.lower() in FREE_METATAGS:
+            continue
+
+        count += 1
+
+    return count
+
+
+def order_fits_tag_limit(tag):
+    return count_limited_tags(tag) < DANBOORU_TAG_LIMIT
+
+
 def build_query(tag, age, rating, order):
-    return f"{tag} age:{age} rating:{rating} order:{order}"
+    # order: cuenta para el limite: con 2 tags no entra y queda el orden por
+    # defecto de Danbooru (los mas nuevos primero).
+    query = f"{tag} age:{age} rating:{rating}"
+    return f"{query} order:{order}" if order_fits_tag_limit(tag) else query
 
 
 def tag_has_wildcard(tag):
@@ -835,6 +898,7 @@ def describe_empty_result(stats):
 
 FAILURE_REASON_LABELS = {
     "too_large": "el archivo pesaba mas de lo permitido",
+    "photo_limits": "Telegram no lo acepta como foto (peso o dimensiones)",
     "download_failed": "no pude descargar el archivo",
     "send_failed": "Telegram rechazo el envio",
     "no_media_url": "el post no tenia una URL de imagen o video",
@@ -872,7 +936,7 @@ def start_fetch(chat_id, tag, age, rating, order):
                     f"tag: {tag}\n"
                     f"age: {age}\n"
                     f"rating: {rating}\n"
-                    f"order: {order}\n"
+                    f"order: {order if order_fits_tag_limit(tag) else 'por defecto (con 2 tags Danbooru no deja sumar order:)'}\n"
                     f"query: {query}"
                 ),
             )
@@ -1025,6 +1089,20 @@ def handle_tag_form_callback(call):
 
     if call.data == "tagform:combined":
         combined = session.get("tag_form_combined") or ""
+        combined_count = count_limited_tags(combined)
+
+        if combined_count > DANBOORU_TAG_LIMIT:
+            try_send("answer_callback_query", bot.answer_callback_query, call.id, "Demasiadas tags.")
+            send_text(
+                chat_id,
+                (
+                    f"Danbooru sin cuenta Gold permite hasta {DANBOORU_TAG_LIMIT} tags por busqueda "
+                    f"y mandaste {combined_count}. Proba con menos."
+                ),
+            )
+            prompt_for_tag(chat_id)
+            return
+
         try_send("answer_callback_query", bot.answer_callback_query, call.id, f"Tags combinadas: {combined}")
         update_session(chat_id, step="tag", tag=combined, tag_query="", tag_options=[])
         send_text(chat_id, f"Tags combinadas: {combined}")

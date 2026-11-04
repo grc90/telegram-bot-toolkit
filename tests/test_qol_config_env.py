@@ -52,3 +52,26 @@ def test_alphabetic_bot_id_raises():
 def test_error_message_includes_var_name():
     with pytest.raises(RuntimeError, match="MY_VAR"):
         validate_telegram_token("MY_VAR", "bad_token")
+
+
+def test_get_int_env_reads_override_and_falls_back(monkeypatch):
+    from config_env import get_int_env
+
+    monkeypatch.setenv("TEST_INT_OVERRIDE", "42")
+    monkeypatch.setenv("TEST_INT_EMPTY", "  ")
+    monkeypatch.delenv("TEST_INT_MISSING", raising=False)
+
+    assert get_int_env("TEST_INT_OVERRIDE", 7) == 42
+    assert get_int_env("TEST_INT_EMPTY", 7) == 7
+    assert get_int_env("TEST_INT_MISSING", 7) == 7
+
+
+def test_get_int_env_rejects_non_integer(monkeypatch):
+    import pytest
+
+    from config_env import get_int_env
+
+    monkeypatch.setenv("TEST_INT_BAD", "ten")
+
+    with pytest.raises(RuntimeError, match="TEST_INT_BAD"):
+        get_int_env("TEST_INT_BAD", 7)

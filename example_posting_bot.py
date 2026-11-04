@@ -19,7 +19,7 @@ import os
 
 from config_env import get_required_env
 
-from posting_bot_shared import create_posting_bot, load_posts_per_batch_setting, posts_per_batch_mode_hint
+from posting_bot_shared import create_posting_bot, load_posts_per_batch_setting
 
 
 SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "examplechannel_settings.json")
@@ -69,125 +69,6 @@ def main(argv=None):
 
     run_bot()
     return 0
-
-
-def prompt_new_posts_per_batch(chat_id):
-    sent_message = APP.call_telegram(
-        "posts_per_batch_prompt_ack",
-        bot.send_message,
-        chat_id,
-        (
-            f"posts_per_batch actual: {APP.posts_per_batch_setting_label()}.\n"
-            "Decime el nuevo valor que queres usar (numero entero mayor que 0, auto o auto2)."
-        ),
-    )
-
-    if sent_message:
-        bot.register_next_step_handler(sent_message, handle_posts_per_batch_reply)
-
-
-def handle_posts_per_batch_reply(message):
-    if not APP.is_allowed_user(message):
-        return
-
-    raw_value = (message.text or "").strip().lower()
-
-    if raw_value in {"auto", "auto2"}:
-        APP.set_posts_per_batch(raw_value)
-        resolved_posts = APP.resolve_posts_per_batch()
-        APP.call_telegram(
-            "posts_per_batch_set_ack",
-            bot.send_message,
-            message.chat.id,
-            (
-                f"Listo. posts_per_batch ahora es {raw_value} "
-                f"({posts_per_batch_mode_hint(raw_value)} -> {resolved_posts} con la queue actual)."
-            ),
-        )
-        return
-
-    try:
-        requested_posts = int(raw_value)
-    except ValueError:
-        APP.call_telegram(
-            "posts_per_batch_reply_invalid_ack",
-            bot.send_message,
-            message.chat.id,
-            "No entendi el valor. Usa /posts_per_batch y responde con un entero mayor que 0, auto o auto2.",
-        )
-        return
-
-    if requested_posts <= 0:
-        APP.call_telegram(
-            "posts_per_batch_reply_invalid_range_ack",
-            bot.send_message,
-            message.chat.id,
-            "El numero debe ser mayor que 0.",
-        )
-        return
-
-    APP.set_posts_per_batch(requested_posts)
-    APP.call_telegram(
-        "posts_per_batch_set_ack",
-        bot.send_message,
-        message.chat.id,
-        f"Listo. posts_per_batch ahora es {requested_posts}.",
-    )
-
-
-@bot.message_handler(commands=["posts_per_batch"])
-def handle_posts_per_batch(message):
-    if not APP.is_allowed_user(message):
-        return
-
-    parts = (message.text or "").split(maxsplit=1)
-
-    if len(parts) > 1:
-        APP.call_telegram(
-            "posts_per_batch_invalid_ack",
-            bot.send_message,
-            message.chat.id,
-            "Usa /posts_per_batch y responde despues con un numero mayor que 0, auto o auto2.",
-        )
-        return
-
-    prompt_new_posts_per_batch(message.chat.id)
-
-
-@bot.message_handler(commands=["posts_per_batch_auto"])
-def handle_posts_per_batch_auto(message):
-    if not APP.is_allowed_user(message):
-        return
-
-    APP.set_posts_per_batch("auto")
-    resolved_posts = APP.resolve_posts_per_batch()
-    APP.call_telegram(
-        "posts_per_batch_set_ack",
-        bot.send_message,
-        message.chat.id,
-        (
-            f"Listo. posts_per_batch ahora es auto "
-            f"({posts_per_batch_mode_hint('auto')} -> {resolved_posts} con la queue actual)."
-        ),
-    )
-
-
-@bot.message_handler(commands=["posts_per_batch_auto2"])
-def handle_posts_per_batch_auto2(message):
-    if not APP.is_allowed_user(message):
-        return
-
-    APP.set_posts_per_batch("auto2")
-    resolved_posts = APP.resolve_posts_per_batch()
-    APP.call_telegram(
-        "posts_per_batch_set_ack",
-        bot.send_message,
-        message.chat.id,
-        (
-            f"Listo. posts_per_batch ahora es auto2 "
-            f"({posts_per_batch_mode_hint('auto2')} -> {resolved_posts} con la queue actual)."
-        ),
-    )
 
 
 if __name__ == "__main__":

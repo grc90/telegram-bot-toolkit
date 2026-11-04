@@ -10,14 +10,15 @@ import io
 import pytest
 from requests import exceptions as requests_exceptions
 
-import imageboard_notifier_bot as notifierbot
+from imageboard_notifier_bot import APP as notifierbot
+import danbooru_notifier_shared as shared
 
 NOTIFIERS = [pytest.param(notifierbot, id="notifier")]
 
 
 @pytest.mark.parametrize("module", NOTIFIERS)
 def test_retry_rewinds_consumed_media_stream(module, monkeypatch):
-    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(shared.time, "sleep", lambda _seconds: None)
     media = io.BytesIO(b"image-bytes")
     seen = []
 
@@ -34,7 +35,7 @@ def test_retry_rewinds_consumed_media_stream(module, monkeypatch):
 
 @pytest.mark.parametrize("module", NOTIFIERS)
 def test_retry_rewinds_media_passed_as_keyword(module, monkeypatch):
-    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(shared.time, "sleep", lambda _seconds: None)
     media = io.BytesIO(b"gif-bytes")
     seen = []
 
@@ -50,7 +51,7 @@ def test_retry_rewinds_media_passed_as_keyword(module, monkeypatch):
 
 @pytest.mark.parametrize("module", NOTIFIERS)
 def test_transient_failure_gives_up_after_configured_attempts(module, monkeypatch):
-    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(shared.time, "sleep", lambda _seconds: None)
     calls = []
 
     def always_timeout():
@@ -58,14 +59,14 @@ def test_transient_failure_gives_up_after_configured_attempts(module, monkeypatc
         raise requests_exceptions.ConnectTimeout("connect timed out")
 
     assert module.try_telegram("upload_photo", always_timeout) is None
-    assert len(calls) == module.SEND_RETRY_ATTEMPTS + 1
+    assert len(calls) == shared.SEND_RETRY_ATTEMPTS + 1
 
 
 @pytest.mark.parametrize("module", NOTIFIERS)
 def test_read_timeout_is_not_retried_in_place(module, monkeypatch):
     # Tras un ReadTimeout Telegram pudo haber publicado la foto: reintentar
     # la subida en el acto la duplicaria.
-    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(shared.time, "sleep", lambda _seconds: None)
     calls = []
 
     def lost_response():
@@ -81,7 +82,7 @@ def test_read_timeout_is_not_retried_in_place(module, monkeypatch):
 
 @pytest.mark.parametrize("module", NOTIFIERS)
 def test_non_transient_error_is_not_retried(module, monkeypatch):
-    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(shared.time, "sleep", lambda _seconds: None)
     calls = []
 
     def rejected():
@@ -102,4 +103,4 @@ def test_rewind_ignores_non_seekable_arguments(module):
             raise OSError("not seekable")
 
     # Must not raise: unseekable payloads simply skip the rewind.
-    module.rewind_media_arguments((NoSeek(), "caption", 7), {"reply_markup": None})
+    shared.rewind_media_arguments((NoSeek(), "caption", 7), {"reply_markup": None})

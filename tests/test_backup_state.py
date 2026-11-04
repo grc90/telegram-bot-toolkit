@@ -125,13 +125,13 @@ def test_old_bot_naming_before_a_rename_is_still_detected_as_queue(tmp_path):
     _make_backup_folder(
         tmp_path,
         old_name,
-        {"oldname_queue.json": "[]", "quetzal_queue.json": "[]"},
+        {"oldname_queue.json": "[]", "renamedbot_queue.json": "[]"},
         mtime=now - timedelta(hours=48),
     )
 
     report = backup_state.find_old_queue_backup_files(retention_hours=24, backup_root=tmp_path, now=now)
 
-    assert {f.name for f in report["to_delete"]} == {"oldname_queue.json", "quetzal_queue.json"}
+    assert {f.name for f in report["to_delete"]} == {"oldname_queue.json", "renamedbot_queue.json"}
 
 
 def test_clean_old_queue_backups_dry_run_does_not_delete(tmp_path):
@@ -362,3 +362,17 @@ def test_clean_old_queue_backups_one_failure_does_not_block_the_rest(tmp_path, m
     assert not (folder_b / "examplechannel_queue.json").exists()  # the other file is still removed
     assert len(report["failed"]) == 1
     assert report["failed"][0][0] == folder_a / "examplechannel_queue.json"
+
+
+def test_latest_backup_age_seconds_uses_newest_folder_name(tmp_path):
+    from datetime import datetime
+
+    from backup_state import latest_backup_age_seconds
+
+    for name in ("state_20260101_000000", "state_20260101_060000_1", "not_a_backup", "state_20260101_030000"):
+        (tmp_path / name).mkdir()
+
+    now = datetime(2026, 1, 1, 7, 0, 0)
+
+    assert latest_backup_age_seconds(tmp_path, now=now) == 3600
+    assert latest_backup_age_seconds(tmp_path / "missing", now=now) is None
