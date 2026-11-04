@@ -887,6 +887,10 @@ class PostingBotApp:
         return self.build_caption(source_url)
 
     def build_post(self, post_type, file_data, source_url):
+        # Se guarda ya limpio: el ?s=20&t=... de Twitter/X no debe quedar en la queue.
+        if source_url:
+            source_url = strip_twitter_tracking(source_url)
+
         post = {
             "type": post_type,
             "caption": self.build_caption(source_url),

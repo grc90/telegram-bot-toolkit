@@ -228,6 +228,42 @@ def test_handle_photo_acks_duplicate(no_recent_history, make_posting_app):
     assert last_call_args[0] == (555, "Ese post ya esta en la queue.")
 
 
+def test_handle_photo_stores_twitter_source_without_modifiers(no_recent_history, make_posting_app):
+    app = make_posting_app()
+    app.bot.send_message = Mock()
+    handler = _photo_handler(app)
+
+    handler(_FakePhotoMessage(caption="https://x.com/x3li9/status/2116335963693551890?s=20&t=PwqO8lGfYYWgrsZh5Eg"))
+
+    queued = app.load_queue()
+    assert queued[0]["source_url"] == "https://x.com/x3li9/status/2116335963693551890"
+    assert "?s=20" not in queued[0]["caption"]
+
+
+def test_process_media_group_stores_twitter_source_without_modifiers(no_recent_history, make_posting_app):
+    app = make_posting_app()
+    app.bot.send_message = Mock()
+
+    first = _FakePhotoMessageForGroup(message_id=1, chat_id=777)
+    first.caption = "https://twitter.com/x3li9/status/2116335963693551890?s=46"
+
+    with app.media_group_lock:
+        app.media_groups["grp1"] = [first, _FakePhotoMessageForGroup(message_id=2, chat_id=777)]
+        app.media_group_special_modes["grp1"] = False
+
+    app.process_media_group("grp1")
+
+    assert app.load_queue()[0]["source_url"] == "https://twitter.com/x3li9/status/2116335963693551890"
+
+
+def test_build_post_keeps_query_on_non_twitter_sources(make_posting_app):
+    app = make_posting_app()
+
+    post = app.build_post("photo", {"file_id": "abc"}, "https://gall.dcinside.com/board/view/?id=x&no=1")
+
+    assert post["source_url"] == "https://gall.dcinside.com/board/view/?id=x&no=1"
+
+
 def test_handle_photo_acks_special_mode(no_recent_history, make_posting_app):
     app = make_posting_app()
     app.bot.send_message = Mock()
